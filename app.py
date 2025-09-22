@@ -36,16 +36,6 @@ except KeyError:
 
 client = OpenAI(api_key=OPENAI_KEY) if OPENAI_KEY else None
 
-import sys
-import pkg_resources
-
-log.info(f"Python {sys.version}")
-for pkg in ["python-docx", "lxml"]:
-    try:
-        v = pkg_resources.get_distribution(pkg).version
-    except Exception:
-        v = "not installed"
-    log.info(f"{pkg}: {v}")
 
 # -------------------- FastAPI --------------------
 app = FastAPI()
@@ -56,6 +46,34 @@ app.add_middleware(
     allow_methods=["POST", "GET", "OPTIONS"],
     allow_headers=["*"],
 )
+
+
+import sys, pkg_resources, logging
+
+@app.on_event("startup")
+async def startup_log():
+    pkgs = ["python-docx", "lxml", "setuptools", "openai"]
+    log.info("=== Startup environment ===")
+    log.info(f"Python: {sys.version}")
+    for name in pkgs:
+        try:
+            v = pkg_resources.get_distribution(name).version
+        except Exception as e:
+            v = f"not found ({e})"
+        log.info(f"{name}: {v}")
+    log.info("=== End environment ===")
+
+@app.get("/debug-env")
+def debug_env():
+    import sys, pkg_resources
+    data = {
+        "python": sys.version,
+        "packages": {
+            n: (pkg_resources.get_distribution(n).version if pkg_resources.works else "unknown")
+            for n in ["python-docx","lxml","setuptools","openai"]
+        }
+    }
+    return data
 
 # -------------------- Health --------------------
 @app.get("/")

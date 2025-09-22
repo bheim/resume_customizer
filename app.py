@@ -1,3 +1,6 @@
+
+
+
 import os
 import logging
 import hashlib
@@ -32,6 +35,17 @@ except KeyError:
     OPENAI_KEY = None
 
 client = OpenAI(api_key=OPENAI_KEY) if OPENAI_KEY else None
+
+import sys
+import pkg_resources
+
+log.info(f"Python {sys.version}")
+for pkg in ["python-docx", "lxml"]:
+    try:
+        v = pkg_resources.get_distribution(pkg).version
+    except Exception:
+        v = "not installed"
+    log.info(f"{pkg}: {v}")
 
 # -------------------- FastAPI --------------------
 app = FastAPI()

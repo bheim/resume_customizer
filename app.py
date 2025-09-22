@@ -1,11 +1,13 @@
 import os
+import logging
+import hashlib
 from io import BytesIO
 from copy import deepcopy
 from typing import List
 
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, Response
 from openai import OpenAI
 from docx import Document
 from docx.oxml import OxmlElement
@@ -13,19 +15,73 @@ from docx.oxml.ns import qn
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.enum.section import WD_SECTION_START
 
-W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+# -------------------- Logging --------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s"
+)
+log = logging.getLogger("resume")
 
+# -------------------- Globals --------------------
+W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+try:
+    OPENAI_KEY = os.environ["OPENAI_API_KEY"]
+except KeyError:
+    log.error("OPENAI_API_KEY not set in environment")
+    OPENAI_KEY = None
+
+client = OpenAI(api_key=OPENAI_KEY) if OPENAI_KEY else None
+
+# -------------------- FastAPI --------------------
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # tighten to your Lovable origin in production
     allow_credentials=True,
-    allow_methods=["POST", "OPTIONS"],
+    allow_methods=["POST", "GET", "OPTIONS"],
     allow_headers=["*"],
 )
 
-# ---------- Word helpers ----------
+# -------------------- Health --------------------
+@app.get("/")
+def root():
+    return {"status": "ok", "openai": bool(OPENAI_KEY)}
+
+# -------------------- Debug helpers --------------------
+@app.post("/echo")
+async def echo(file: UploadFile = File(...)):
+    data = await file.read()
+    info = {
+        "filename": file.filename,
+        "content_type": file.content_type,
+        "size_bytes": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+    }
+    log.info(f"/echo: {info}")
+    return JSONResponse(info)
+
+@app.post("/probe")
+async def probe(file: UploadFile = File(...)):
+    raw = await file.read()
+    try:
+        d = Document(BytesIO(raw))
+    except Exception as e:
+        log.exception("Probe: failed to open DOCX")
+        return JSONResponse({"error": "bad_docx", "detail": str(e)}, status_code=400)
+
+    total = len(d.paragraphs)
+    list_paras = 0
+    for p in d.paragraphs:
+        pPr = p._p.pPr
+        if pPr and pPr.numPr and pPr.numPr.numId is not None and pPr.numPr.numId.val is not None:
+            list_paras += 1
+
+    info = {"total_paragraphs": total, "list_paragraphs": list_paras}
+    log.info(f"/probe: {info}")
+    return JSONResponse(info)
+
+# -------------------- Word helpers --------------------
 def _collect_links(p):
     links, p_el = [], p._p
     for h in p_el.findall(f".//{{{W_NS}}}hyperlink"):
@@ -121,8 +177,10 @@ def enforce_single_page(doc: Document):
     while len(_body_p())>1 and not doc.paragraphs[-1].text.strip():
         body.remove(doc.paragraphs[-1]._element)
 
-# ---------- Model call ----------
+# -------------------- OpenAI call --------------------
 def rewrite_with_openai(bullets: List[str], job_description: str) -> List[str]:
+    if not client:
+        raise RuntimeError("OPENAI_API_KEY missing")
     prompt = f"""You are a professional resume writer. Rewrite the bullets for the job description.
 Be concise and keep each bullet roughly the same length.
 
@@ -133,44 +191,112 @@ Bullets:
 {chr(10).join(f"- {b}" for b in bullets)}
 
 Return only rewritten bullets, one per line, no extra text."""
+    log.info(f"OpenAI request: bullets={len(bullets)}, jd_chars={len(job_description)}")
     r = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role":"user","content":prompt}],
         temperature=0.7
     )
+    # usage may exist depending on SDK version
+    usage = getattr(r, "usage", None)
+    if usage:
+        log.info(f"OpenAI usage: {usage}")
     text = r.choices[0].message.content.strip()
-    return [line.strip("- ").strip() for line in text.splitlines() if line.strip()]
+    lines = [line.strip("- ").strip() for line in text.splitlines() if line.strip()]
+    log.info(f"OpenAI response lines: {len(lines)}")
+    return lines
 
-# ---------- Single endpoint for Lovable ----------
+# -------------------- Main endpoint --------------------
 @app.post("/rewrite")
 async def rewrite(file: UploadFile = File(...), job_description: str = Form(...)):
+    # Read upload
     raw = await file.read()
-    doc = Document(BytesIO(raw))
+    size = len(raw)
+    ct = file.content_type
+    sha = hashlib.sha256(raw).hexdigest()
+    log.info(f"/rewrite: recv filename='{file.filename}' ct='{ct}' size={size} sha256={sha} jd_len={len(job_description)}")
 
-    # collect bullet paragraphs
+    # Validate upload
+    if not raw or size < 512:  # resumes should be >0.5KB
+        log.warning("Upload too small or empty")
+        return JSONResponse({"error": "empty_or_small_file", "size": size}, status_code=400)
+    if ct not in {
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/octet-stream",  # some clients send this
+        "application/msword",        # rare legacy
+    }:
+        log.warning(f"Unexpected content-type: {ct}")
+        return JSONResponse({"error": "bad_content_type", "got": ct}, status_code=415)
+
+    # Open DOCX
+    try:
+        doc = Document(BytesIO(raw))
+    except Exception as e:
+        log.exception("Failed to open DOCX")
+        return JSONResponse({"error": "bad_docx", "detail": str(e)}, status_code=400)
+
+    # Collect bullets (strict Word lists)
     bullets, paras = [], []
     for p in doc.paragraphs:
-        pPr=p._p.pPr
+        pPr = p._p.pPr
         if not (pPr and pPr.numPr and pPr.numPr.numId and pPr.numPr.numId.val):
             continue
         text = p.text.strip()
         if text:
             bullets.append(text); paras.append(p)
 
+    log.info(f"Bullet discovery: total_paragraphs={len(doc.paragraphs)} list_paragraphs={len(paras)}")
+
     if not bullets:
-        return {"error":"no bullets found"}
+        # Log a sample of paragraphs to see what server sees
+        sample = [p.text.strip() for p in doc.paragraphs[:5]]
+        log.warning(f"No bullets found. First_paragraphs_sample={sample}")
+        return JSONResponse({"error": "no_bullets_found"}, status_code=422)
 
-    rewritten = rewrite_with_openai(bullets, job_description)
+    # Rewrite
+    try:
+        rewritten = rewrite_with_openai(bullets, job_description)
+    except Exception as e:
+        log.exception("OpenAI call failed")
+        return JSONResponse({"error": "openai_failed", "detail": str(e)}, status_code=502)
+
     if len(rewritten) != len(paras):
-        return {"error":"bullet count mismatch"}
+        log.error(f"Bullet count mismatch: in={len(paras)} out={len(rewritten)}")
+        return JSONResponse(
+            {"error": "bullet_count_mismatch", "in": len(paras), "out": len(rewritten)},
+            status_code=500
+        )
 
-    for p,new_text in zip(paras, rewritten):
-        set_paragraph_text_with_selective_links(p, new_text)
+    # Apply edits
+    edited = 0
+    for p, new_text in zip(paras, rewritten):
+        try:
+            set_paragraph_text_with_selective_links(p, new_text)
+            edited += 1
+        except Exception as e:
+            log.exception("Failed applying paragraph edit")
+            return JSONResponse({"error": "apply_failed", "detail": str(e)}, status_code=500)
 
-    enforce_single_page(doc)
-    out_buf = BytesIO(); doc.save(out_buf); out_buf.seek(0)
-    return StreamingResponse(
-        out_buf,
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": 'attachment; filename="resume_edited.docx"'}
-    )
+    log.info(f"Applied edits to {edited} paragraphs")
+
+    # Layout cleanup
+    try:
+        enforce_single_page(doc)
+    except Exception as e:
+        log.exception("enforce_single_page failed")
+        return JSONResponse({"error": "layout_failed", "detail": str(e)}, status_code=500)
+
+    # Save DOCX
+    try:
+        buf = BytesIO()
+        doc.save(buf)
+        data = buf.getvalue()
+        log.info(f"Returning DOCX bytes={len(data)} sha256={hashlib.sha256(data).hexdigest()}")
+        return Response(
+            content=data,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={"Content-Disposition": 'attachment; filename="resume_edited.docx"'}
+        )
+    except Exception as e:
+        log.exception("Failed to serialize DOCX")
+        return JSONResponse({"error": "serialize_failed", "detail": str(e)}, status_code=500)

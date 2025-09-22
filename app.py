@@ -1,6 +1,3 @@
-
-
-
 import os
 import logging
 import hashlib
@@ -19,68 +16,30 @@ from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.enum.section import WD_SECTION_START
 
 # -------------------- Logging --------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("resume")
 
 # -------------------- Globals --------------------
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-
-try:
-    OPENAI_KEY = os.environ["OPENAI_API_KEY"]
-except KeyError:
-    log.error("OPENAI_API_KEY not set in environment")
-    OPENAI_KEY = None
-
+OPENAI_KEY = os.environ.get("OPENAI_API_KEY")
 client = OpenAI(api_key=OPENAI_KEY) if OPENAI_KEY else None
-
 
 # -------------------- FastAPI --------------------
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten to your Lovable origin in production
+    allow_origins=["*"],  # tighten for production
     allow_credentials=True,
     allow_methods=["POST", "GET", "OPTIONS"],
     allow_headers=["*"],
 )
-
-
-import sys, pkg_resources, logging
-
-@app.on_event("startup")
-async def startup_log():
-    pkgs = ["python-docx", "lxml", "setuptools", "openai"]
-    log.info("=== Startup environment ===")
-    log.info(f"Python: {sys.version}")
-    for name in pkgs:
-        try:
-            v = pkg_resources.get_distribution(name).version
-        except Exception as e:
-            v = f"not found ({e})"
-        log.info(f"{name}: {v}")
-    log.info("=== End environment ===")
-
-@app.get("/debug-env")
-def debug_env():
-    import sys, pkg_resources
-    data = {
-        "python": sys.version,
-        "packages": {
-            n: (pkg_resources.get_distribution(n).version if pkg_resources.works else "unknown")
-            for n in ["python-docx","lxml","setuptools","openai"]
-        }
-    }
-    return data
 
 # -------------------- Health --------------------
 @app.get("/")
 def root():
     return {"status": "ok", "openai": bool(OPENAI_KEY)}
 
-# -------------------- Debug helpers --------------------
+# -------------------- Debug: echo upload bytes --------------------
 @app.post("/echo")
 async def echo(file: UploadFile = File(...)):
     data = await file.read()
@@ -93,24 +52,69 @@ async def echo(file: UploadFile = File(...)):
     log.info(f"/echo: {info}")
     return JSONResponse(info)
 
-@app.post("/probe")
-async def probe(file: UploadFile = File(...)):
+# -------------------- Debug: structure probe (numbering, glyphs, tables) --------------------
+@app.post("/probe2")
+async def probe2(file: UploadFile = File(...)):
+    BULLET_CHARS = {"•","·","-","–","—","◦","●","*"}
     raw = await file.read()
     try:
         d = Document(BytesIO(raw))
     except Exception as e:
-        log.exception("Probe: failed to open DOCX")
+        log.exception("Probe2: failed to open DOCX")
         return JSONResponse({"error": "bad_docx", "detail": str(e)}, status_code=400)
 
-    total = len(d.paragraphs)
-    list_paras = 0
+    # Numbering XML presence
+    numpart = getattr(d.part, "numbering_part", None)
+    ns = {"w": W_NS}
+    num_counts = {"num": 0, "abstractNum": 0}
+    if numpart is not None:
+        root = numpart.element
+        num_counts["num"] = len(root.findall(".//w:num", namespaces=ns))
+        num_counts["abstractNum"] = len(root.findall(".//w:abstractNum", namespaces=ns))
+
+    # Body paragraphs: numbered vs glyph-like
+    total_body = len(d.paragraphs)
+    word_list_count = 0
+    glyph_like = 0
+    glyph_samples = []
     for p in d.paragraphs:
         pPr = p._p.pPr
-        if pPr and pPr.numPr and pPr.numPr.numId is not None and pPr.numPr.numId.val is not None:
-            list_paras += 1
+        is_list = (
+            (pPr is not None)
+            and (getattr(pPr, "numPr", None) is not None)
+            and (getattr(pPr.numPr, "numId", None) is not None)
+            and (getattr(pPr.numPr.numId, "val", None) is not None)
+        )
+        if is_list:
+            word_list_count += 1
+        t = p.text.strip()
+        if t and t[0] in BULLET_CHARS:
+            glyph_like += 1
+            if len(glyph_samples) < 5:
+                glyph_samples.append(t[:120])
 
-    info = {"total_paragraphs": total, "list_paragraphs": list_paras}
-    log.info(f"/probe: {info}")
+    # Paragraphs inside tables
+    table_paras = 0
+    table_samples = []
+    for tbl in d.tables:
+        for row in tbl.rows:
+            for cell in row.cells:
+                for p in cell.paragraphs:
+                    table_paras += 1
+                    if len(table_samples) < 5 and p.text.strip():
+                        table_samples.append(p.text.strip()[:120])
+
+    info = {
+        "numbering_part_present": numpart is not None,
+        "numbering_xml_counts": num_counts,
+        "total_body_paragraphs": total_body,
+        "word_numbered_list_paragraphs": word_list_count,
+        "glyph_like_bullets_count": glyph_like,
+        "glyph_like_samples": glyph_samples,
+        "table_paragraphs_count": table_paras,
+        "table_paragraph_samples": table_samples,
+    }
+    log.info(f"/probe2: {info}")
     return JSONResponse(info)
 
 # -------------------- Word helpers --------------------
@@ -229,10 +233,6 @@ Return only rewritten bullets, one per line, no extra text."""
         messages=[{"role":"user","content":prompt}],
         temperature=0.7
     )
-    # usage may exist depending on SDK version
-    usage = getattr(r, "usage", None)
-    if usage:
-        log.info(f"OpenAI usage: {usage}")
     text = r.choices[0].message.content.strip()
     lines = [line.strip("- ").strip() for line in text.splitlines() if line.strip()]
     log.info(f"OpenAI response lines: {len(lines)}")
@@ -249,13 +249,13 @@ async def rewrite(file: UploadFile = File(...), job_description: str = Form(...)
     log.info(f"/rewrite: recv filename='{file.filename}' ct='{ct}' size={size} sha256={sha} jd_len={len(job_description)}")
 
     # Validate upload
-    if not raw or size < 512:  # resumes should be >0.5KB
+    if not raw or size < 512:
         log.warning("Upload too small or empty")
         return JSONResponse({"error": "empty_or_small_file", "size": size}, status_code=400)
     if ct not in {
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "application/octet-stream",  # some clients send this
-        "application/msword",        # rare legacy
+        "application/octet-stream",
+        "application/msword",
     }:
         log.warning(f"Unexpected content-type: {ct}")
         return JSONResponse({"error": "bad_content_type", "got": ct}, status_code=415)
@@ -267,11 +267,16 @@ async def rewrite(file: UploadFile = File(...), job_description: str = Form(...)
         log.exception("Failed to open DOCX")
         return JSONResponse({"error": "bad_docx", "detail": str(e)}, status_code=400)
 
-    # Collect bullets (strict Word lists)
+    # Collect bullets (strict Word-numbered lists in body)
     bullets, paras = [], []
     for p in doc.paragraphs:
         pPr = p._p.pPr
-        if not (pPr and pPr.numPr and pPr.numPr.numId and pPr.numPr.numId.val):
+        if not (
+            (pPr is not None)
+            and (getattr(pPr, "numPr", None) is not None)
+            and (getattr(pPr.numPr, "numId", None) is not None)
+            and (getattr(pPr.numPr.numId, "val", None) is not None)
+        ):
             continue
         text = p.text.strip()
         if text:
@@ -280,7 +285,6 @@ async def rewrite(file: UploadFile = File(...), job_description: str = Form(...)
     log.info(f"Bullet discovery: total_paragraphs={len(doc.paragraphs)} list_paragraphs={len(paras)}")
 
     if not bullets:
-        # Log a sample of paragraphs to see what server sees
         sample = [p.text.strip() for p in doc.paragraphs[:5]]
         log.warning(f"No bullets found. First_paragraphs_sample={sample}")
         return JSONResponse({"error": "no_bullets_found"}, status_code=422)
@@ -294,10 +298,7 @@ async def rewrite(file: UploadFile = File(...), job_description: str = Form(...)
 
     if len(rewritten) != len(paras):
         log.error(f"Bullet count mismatch: in={len(paras)} out={len(rewritten)}")
-        return JSONResponse(
-            {"error": "bullet_count_mismatch", "in": len(paras), "out": len(rewritten)},
-            status_code=500
-        )
+        return JSONResponse({"error": "bullet_count_mismatch", "in": len(paras), "out": len(rewritten)}, status_code=500)
 
     # Apply edits
     edited = 0
@@ -320,9 +321,7 @@ async def rewrite(file: UploadFile = File(...), job_description: str = Form(...)
 
     # Save DOCX
     try:
-        buf = BytesIO()
-        doc.save(buf)
-        data = buf.getvalue()
+        buf = BytesIO(); doc.save(buf); data = buf.getvalue()
         log.info(f"Returning DOCX bytes={len(data)} sha256={hashlib.sha256(data).hexdigest()}")
         return Response(
             content=data,

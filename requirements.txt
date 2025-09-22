@@ -4,5 +4,4 @@ python-docx
 lxml
 openai>=1.0.0
 python-multipart
-sys
-pkg_resources
+setuptools

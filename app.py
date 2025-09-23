@@ -217,8 +217,8 @@ def enforce_single_page(doc: Document):
 def rewrite_with_openai(bullets: List[str], job_description: str) -> List[str]:
     if not client:
         raise RuntimeError("OPENAI_API_KEY missing")
-    prompt = f"""You are a professional recruitier for the industry of the job detailed below. Review the resume and rewrite the resume to sounnd more results-driven, quantifiable, and compelling for this role.
-    Focus on achievement, not just duties. Optimize it for the Applicant Tracking System (ATS) and use industry-specific words naturally.
+    prompt = f"""You are a professional resume writer. Rewrite the bullets for the job description.
+Be concise and keep each bullet roughly the same length.
 
 Job Description:
 {job_description}

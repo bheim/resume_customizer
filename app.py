@@ -218,7 +218,7 @@ def rewrite_with_openai(bullets: List[str], job_description: str) -> List[str]:
     if not client:
         raise RuntimeError("OPENAI_API_KEY missing")
     prompt = f"""You are a professional recruitier for the industry of the job detailed below. Review the resume and rewrite the resume to sounnd more results-driven, quantifiable, and compelling for this role.
-    Focus on achievement, not just duties. Optimize it for the Applicant Tracking System (ATS) and use industry-specific words naturally.
+    Focus on achievement, not just duties. Optimize it for the Applicant Tracking System (ATS) and use industry-specific words naturally. Importantly, do not extend bullets in length. This just fits a page perfectly, so do not make it go over.
 
 Job Description:
 {job_description}

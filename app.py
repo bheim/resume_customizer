@@ -4,6 +4,8 @@ import hashlib
 from io import BytesIO
 from copy import deepcopy
 from typing import List, Tuple
+# -------------------- Logging --------------------
+import sys
 
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,7 +18,16 @@ from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.enum.section import WD_SECTION_START
 from PIL import ImageFont  # <-- added
 
-# -------------------- Logging --------------------
+
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+    force=True,   # override uvicorn/gunicorn defaults
+)
+log = logging.getLogger("resume")
+log.propagate = True
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("resume")
 

@@ -3,7 +3,7 @@ import logging
 import hashlib
 from io import BytesIO
 from copy import deepcopy
-from typing import List
+from typing import List, Tuple
 
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,6 +14,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.enum.section import WD_SECTION_START
+from PIL import ImageFont  # <-- added
 
 # -------------------- Logging --------------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -213,30 +214,128 @@ def enforce_single_page(doc: Document):
     while len(_body_p())>1 and not doc.paragraphs[-1].text.strip():
         body.remove(doc.paragraphs[-1]._element)
 
+# -------------------- Layout wrap simulator --------------------
+def _doc_page_usable_width(doc: Document) -> float:
+    sect = doc.sections[-1]
+    # twips -> inches
+    return (sect.page_width - sect.left_margin - sect.right_margin) / 12700.0
+
+def _para_usable_width_in(doc: Document, p) -> Tuple[float, float]:
+    pPr = p._p.pPr
+    left = 0.0
+    first = 0.0
+    if pPr is not None and getattr(pPr, "ind", None) is not None:
+        ind = pPr.ind
+        left = float((getattr(ind, "left", 0) or 0)) / 12700.0
+        first = float((getattr(ind, "firstLine", 0) or 0)) / 12700.0
+        hanging = float((getattr(ind, "hanging", 0) or 0)) / 12700.0
+        if hanging:
+            first -= hanging
+    base = _doc_page_usable_width(doc)
+    width_other = max(base - left, 0.5)
+    width_first = max(base - left - max(first, 0.0), 0.5)
+    return width_other, width_first
+
+def _para_font(p) -> Tuple[str, float]:
+    name = None; size_pt = None
+    if p.style and p.style.font:
+        if p.style.font.name:
+            name = p.style.font.name
+        if p.style.font.size:
+            size_pt = p.style.font.size.pt
+    for r in p.runs:
+        if not name and r.font and r.font.name:
+            name = r.font.name
+        if not size_pt and r.font and r.font.size:
+            size_pt = r.font.size.pt
+        if name and size_pt:
+            break
+    return name or "Calibri", size_pt or 11.0
+
+def _measure_lines(text: str, font_name: str, size_pt: float, width_first_in: float, width_other_in: float) -> int:
+    # 96 dpi approximation
+    px_first = int(width_first_in * 96)
+    px_other = int(width_other_in * 96)
+    try:
+        font = ImageFont.truetype(font_name, int(round(size_pt)))
+    except Exception:
+        font = ImageFont.load_default()
+    words = text.split(" ")
+    lines = []
+    cur = ""
+    for w in words:
+        test = w if not cur else cur + " " + w
+        limit = px_first if len(lines) == 0 else px_other
+        try_len = font.getlength(test)
+        if try_len <= limit:
+            cur = test
+        else:
+            if cur:
+                lines.append(cur)
+                cur = w
+            else:
+                # unbreakable token
+                lines.append(w)
+                cur = ""
+    if cur:
+        lines.append(cur)
+    return max(1, len(lines))
+
+def _allowed_lines_for_para(doc: Document, p) -> int:
+    fn, sz = _para_font(p)
+    w_other, w_first = _para_usable_width_in(doc, p)
+    return _measure_lines(p.text.strip(), fn, sz, w_first, w_other)
+
 # -------------------- OpenAI call --------------------
 def rewrite_with_openai(bullets: List[str], job_description: str) -> List[str]:
     if not client:
         raise RuntimeError("OPENAI_API_KEY missing")
-    prompt = f"""You are a professional recruitier for the industry of the job detailed below. Review the resume and rewrite the resume to sounnd more results-driven, quantifiable, and compelling for this role.
-    Focus on achievement, not just duties. Optimize it for the Applicant Tracking System (ATS) and use industry-specific words naturally. Importantly, do not extend bullets in length. This just fits a page perfectly, so do not make it go over.
+    prompt = f"""You are a professional recruiter for the role below. Rewrite the bullets to be results-driven, quantified, and ATS-friendly.
+Hard caps:
+- Keep each bullet no longer than its original character count.
+- Do not add new clauses or extra sentences.
+Return exactly one rewritten bullet per line. No numbering. No extra text.
 
 Job Description:
 {job_description}
 
 Bullets:
-{chr(10).join(f"- {b}" for b in bullets)}
-
-Return only rewritten bullets, one per line, no extra text."""
+{chr(10).join(f"- {b}" for b in bullets)}"""
     log.info(f"OpenAI request: bullets={len(bullets)}, jd_chars={len(job_description)}")
     r = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role":"user","content":prompt}],
-        temperature=0.7
+        temperature=0
     )
     text = r.choices[0].message.content.strip()
     lines = [line.strip("- ").strip() for line in text.splitlines() if line.strip()]
     log.info(f"OpenAI response lines: {len(lines)}")
     return lines
+
+def reprompt_fit(text: str, allowed_lines: int, fn: str, sz: float, w_first: float, w_other: float) -> str:
+    """Reprompt the model with a strict character cap until wrapped lines <= allowed_lines or attempts exhausted."""
+    if not client:
+        return text  # fail-safe: no API, return as-is
+    tries = 0
+    cur = text.strip().lstrip("-• ").strip()
+    while _measure_lines(cur, fn, sz, w_first, w_other) > allowed_lines and tries < 3:
+        measured = _measure_lines(cur, fn, sz, w_first, w_other)
+        # proportional cap with safety factor
+        cap = max(30, int(len(cur) * allowed_lines / max(1, measured) * 0.9))
+        prompt = (
+            "Rewrite as a single resume bullet no longer than "
+            f"{cap} characters. Preserve all numbers and the core result. "
+            "Use one concise clause if possible. No filler. Return only the bullet."
+            f"\n\nBullet:\n{cur}"
+        )
+        r = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0
+        )
+        cur = r.choices[0].message.content.strip().lstrip("-• ").strip()
+        tries += 1
+    return cur
 
 # -------------------- Main endpoint --------------------
 @app.post("/rewrite")
@@ -289,7 +388,15 @@ async def rewrite(file: UploadFile = File(...), job_description: str = Form(...)
         log.warning(f"No bullets found. First_paragraphs_sample={sample}")
         return JSONResponse({"error": "no_bullets_found"}, status_code=422)
 
-    # Rewrite
+    # Precompute allowed lines from original bullets
+    try:
+        allowed_lines_vec = [_allowed_lines_for_para(doc, p) for p in paras]
+        log.info(f"Allowed line counts (per bullet): {allowed_lines_vec}")
+    except Exception as e:
+        log.exception("Failed to compute allowed lines")
+        return JSONResponse({"error": "measure_failed", "detail": str(e)}, status_code=500)
+
+    # Rewrite with LLM
     try:
         rewritten = rewrite_with_openai(bullets, job_description)
     except Exception as e:
@@ -300,11 +407,14 @@ async def rewrite(file: UploadFile = File(...), job_description: str = Form(...)
         log.error(f"Bullet count mismatch: in={len(paras)} out={len(rewritten)}")
         return JSONResponse({"error": "bullet_count_mismatch", "in": len(paras), "out": len(rewritten)}, status_code=500)
 
-    # Apply edits
+    # Enforce line budgets by reprompting with caps
     edited = 0
-    for p, new_text in zip(paras, rewritten):
+    for idx, (p, new_text) in enumerate(zip(paras, rewritten)):
         try:
-            set_paragraph_text_with_selective_links(p, new_text)
+            fn, sz = _para_font(p)
+            w_other, w_first = _para_usable_width_in(doc, p)
+            fitted = reprompt_fit(new_text, allowed_lines_vec[idx], fn, sz, w_first, w_other)
+            set_paragraph_text_with_selective_links(p, fitted)
             edited += 1
         except Exception as e:
             log.exception("Failed applying paragraph edit")
@@ -326,7 +436,7 @@ async def rewrite(file: UploadFile = File(...), job_description: str = Form(...)
         return Response(
             content=data,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            headers={"Content-Disposition": 'attachment; filename="resume_edited.docx"'}
+            headers={"Content-Disposition": 'attachment; filename=\"resume_edited.docx\"'}
         )
     except Exception as e:
         log.exception("Failed to serialize DOCX")

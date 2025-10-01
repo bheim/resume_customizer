@@ -5,3 +5,4 @@ lxml
 openai>=1.0.0
 python-multipart
 setuptools
+pillow

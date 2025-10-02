@@ -28,7 +28,7 @@ log = logging.getLogger("resume")
 log.propagate = True
 
 # -------------------- Config --------------------
-SLACK_CHARS = int(os.getenv("SLACK_CHARS", "30"))
+SLACK_CHARS = int(os.getenv("SLACK_CHARS", "25"))
 
 # -------------------- Globals --------------------
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"

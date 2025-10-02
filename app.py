@@ -3,8 +3,7 @@ import logging
 import hashlib
 from io import BytesIO
 from copy import deepcopy
-from typing import List, Tuple
-# -------------------- Logging --------------------
+from typing import List
 import sys
 
 from fastapi import FastAPI, UploadFile, File, Form
@@ -16,22 +15,20 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.enum.section import WD_SECTION_START
-from PIL import ImageFont  # <-- used for measurement
 
+# -------------------- Logging --------------------
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
-    force=True,   # override uvicorn/gunicorn defaults
+    force=True,
 )
 log = logging.getLogger("resume")
 log.propagate = True
 
-# ---- line-fit config (NEW) ----
-LINEFIT_FUDGE = float(os.getenv("LINEFIT_FUDGE", "0.90"))        # 0.85–0.92 typical
-LINEFIT_FONT_PATH = os.getenv("LINEFIT_FONT_PATH", "")           # e.g., "fonts/DejaVuSans.ttf"
-VERBOSE_LINEFIT = os.getenv("VERBOSE_LINEFIT", "0") == "1"
+# -------------------- Config --------------------
+SLACK_CHARS = int(os.getenv("SLACK_CHARS", "15"))
 
 # -------------------- Globals --------------------
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -227,123 +224,13 @@ def enforce_single_page(doc: Document):
     while len(_body_p())>1 and not doc.paragraphs[-1].text.strip():
         body.remove(doc.paragraphs[-1]._element)
 
-# -------------------- Layout wrap simulator --------------------
-def _doc_page_usable_width(doc: Document) -> float:
-    sect = doc.sections[-1]
-    # twips -> inches
-    return (sect.page_width - sect.left_margin - sect.right_margin) / 12700.0
-
-def _para_usable_width_in(doc: Document, p) -> Tuple[float, float]:
-    pPr = p._p.pPr
-    left = 0.0
-    first = 0.0
-    if pPr is not None and getattr(pPr, "ind", None) is not None:
-        ind = pPr.ind
-        left = float((getattr(ind, "left", 0) or 0)) / 12700.0
-        first = float((getattr(ind, "firstLine", 0) or 0)) / 12700.0
-        hanging = float((getattr(ind, "hanging", 0) or 0)) / 12700.0
-        if hanging:
-            first -= hanging
-    base = _doc_page_usable_width(doc)
-    width_other = max(base - left, 0.5)
-    width_first = max(base - left - max(first, 0.0), 0.5)
-    return width_other, width_first
-
-def _para_font(p) -> Tuple[str, float]:
-    name = None; size_pt = None
-    if p.style and p.style.font:
-        if p.style.font.name:
-            name = p.style.font.name
-        if p.style.font.size:
-            size_pt = p.style.font.size.pt
-    for r in p.runs:
-        if not name and r.font and r.font.name:
-            name = r.font.name
-        if not size_pt and r.font and r.font.size:
-            size_pt = r.font.size.pt
-        if name and size_pt:
-            break
-    return name or "Calibri", size_pt or 11.0
-
-# --- font loader (NEW) ---
-def _load_font(font_name: str, size_pt: float):
-    # 1) explicit path in container (recommended)
-    if LINEFIT_FONT_PATH:
-        try:
-            f = ImageFont.truetype(LINEFIT_FONT_PATH, int(round(size_pt)))
-            log.info(f"linefit font=FILE:{LINEFIT_FONT_PATH} size={size_pt}")
-            return f
-        except Exception as e:
-            log.warning(f"linefit cannot load LINEFIT_FONT_PATH='{LINEFIT_FONT_PATH}': {e}")
-    # 2) try by name (works if font is installed in the container)
-    try:
-        f = ImageFont.truetype(font_name, int(round(size_pt)))
-        log.info(f"linefit font=NAME:{font_name} size={size_pt}")
-        return f
-    except Exception:
-        pass
-    # 3) common Linux fallbacks
-    for path in (
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-    ):
-        try:
-            f = ImageFont.truetype(path, int(round(size_pt)))
-            log.info(f"linefit font=FALLBACK:{path} size={size_pt}")
-            return f
-        except Exception:
-            continue
-    # 4) bitmap fallback
-    log.warning("linefit font=DEFAULT_BITMAP; measurements may be inaccurate")
-    return ImageFont.load_default()
-
-# --- measurement with normalization + fudge (UPDATED) ---
-def _measure_lines(text: str, font_name: str, size_pt: float, width_first_in: float, width_other_in: float) -> int:
-    # normalize Word artifacts
-    t = text.replace("\u00A0", " ").replace("\t", " ")
-    while "  " in t:
-        t = t.replace("  ", " ")
-    t = t.strip()
-
-    # inches->px with conservative fudge so wraps happen slightly early
-    px_first = int(width_first_in * 96 * LINEFIT_FUDGE)
-    px_other = int(width_other_in * 96 * LINEFIT_FUDGE)
-
-    font = _load_font(font_name, size_pt)
-
-    words = t.split(" ")
-    lines, cur = [], ""
-    for w in words:
-        candidate = w if not cur else cur + " " + w
-        limit = px_first if len(lines) == 0 else px_other
-        if font.getlength(candidate) <= limit:
-            cur = candidate
-        else:
-            if cur:
-                lines.append(cur); cur = w
-            else:
-                lines.append(w); cur = ""
-    if cur:
-        lines.append(cur)
-
-    if VERBOSE_LINEFIT and len(t) < 400:
-        log.debug(f"[linefit] fn='{font_name}' sz={size_pt} first_in={width_first_in:.3f} other_in={width_other_in:.3f} "
-                  f"px_first={px_first} px_other={px_other} fudge={LINEFIT_FUDGE} chars={len(t)} lines={len(lines)}")
-    return max(1, len(lines))
-
-def _allowed_lines_for_para(doc: Document, p) -> int:
-    fn, sz = _para_font(p)
-    w_other, w_first = _para_usable_width_in(doc, p)
-    return _measure_lines(p.text.strip(), fn, sz, w_first, w_other)
-
-# -------------------- OpenAI call (unchanged) --------------------
+# -------------------- OpenAI call --------------------
 def rewrite_with_openai(bullets: List[str], job_description: str) -> List[str]:
     if not client:
         raise RuntimeError("OPENAI_API_KEY missing")
     prompt = f"""You are a professional recruiter for the role below. Rewrite the bullets to be results-driven, quantified, and ATS-friendly.
-Hard caps:
-- Keep each bullet no longer than its original character count.
-- Do not add new clauses or extra sentences.
+Constraints:
+- Keep each bullet concise. Do not add extra sentences or clauses.
 Return exactly one rewritten bullet per line. No numbering. No extra text.
 
 Job Description:
@@ -362,15 +249,57 @@ Bullets:
     log.info(f"OpenAI response lines: {len(lines)}")
     return lines
 
-# -------------------- Main endpoint (only measurement-related logs changed) --------------------
+# -------------------- Char-cap enforcement --------------------
+def enforce_char_cap_with_reprompt(orig_text: str, rewritten: str, *, tries: int = 3) -> str:
+    """
+    Ensure rewritten <= len(orig)+SLACK_CHARS.
+    Reprompts with a hard cap. Final guard truncates if still long.
+    """
+    cap = max(1, len(orig_text) + SLACK_CHARS)
+    cur = (rewritten or "").strip().lstrip("-• ").strip()
+
+    if not client:
+        return cur[:cap].rstrip()
+
+    # fast pass: if already within cap, just trim whitespace and return
+    if len(cur) <= cap:
+        return cur
+
+    for t in range(tries):
+        prompt = (
+            f"Rewrite this resume bullet in no more than {cap} characters. "
+            "Preserve all numbers and the core outcome. "
+            "Use one concise clause. No filler. "
+            "Return only the bullet text, no dash, no quotes.\n\n"
+            f"Bullet:\n{cur}"
+        )
+        r = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0
+        )
+        nxt = r.choices[0].message.content.strip().lstrip("-• ").strip()
+        log.info(f"charcap reprompt try={t+1} cap={cap} prev_len={len(cur)} new_len={len(nxt)}")
+        cur = nxt
+        if len(cur) <= cap:
+            break
+
+    if len(cur) > cap:
+        log.info(f"charcap truncate len={len(cur)} -> cap={cap}")
+        cur = cur[:cap].rstrip()
+    return cur
+
+# -------------------- Main endpoint --------------------
 @app.post("/rewrite")
 async def rewrite(file: UploadFile = File(...), job_description: str = Form(...)):
+    # Read upload
     raw = await file.read()
     size = len(raw)
     ct = file.content_type
     sha = hashlib.sha256(raw).hexdigest()
     log.info(f"/rewrite: recv filename='{file.filename}' ct='{ct}' size={size} sha256={sha} jd_len={len(job_description)}")
 
+    # Validate upload
     if not raw or size < 512:
         log.warning("Upload too small or empty")
         return JSONResponse({"error": "empty_or_small_file", "size": size}, status_code=400)
@@ -382,12 +311,14 @@ async def rewrite(file: UploadFile = File(...), job_description: str = Form(...)
         log.warning(f"Unexpected content-type: {ct}")
         return JSONResponse({"error": "bad_content_type", "got": ct}, status_code=415)
 
+    # Open DOCX
     try:
         doc = Document(BytesIO(raw))
     except Exception as e:
         log.exception("Failed to open DOCX")
         return JSONResponse({"error": "bad_docx", "detail": str(e)}, status_code=400)
 
+    # Collect bullets (strict Word-numbered lists in body)
     bullets, paras = [], []
     for p in doc.paragraphs:
         pPr = p._p.pPr
@@ -409,15 +340,7 @@ async def rewrite(file: UploadFile = File(...), job_description: str = Form(...)
         log.warning(f"No bullets found. First_paragraphs_sample={sample}")
         return JSONResponse({"error": "no_bullets_found"}, status_code=422)
 
-    # Accurate allowed-lines measurement
-    try:
-        allowed_lines_vec = [_allowed_lines_for_para(doc, p) for p in paras]
-        log.info(f"Allowed line counts (per bullet): {allowed_lines_vec}")
-    except Exception as e:
-        log.exception("Failed to compute allowed lines")
-        return JSONResponse({"error": "measure_failed", "detail": str(e)}, status_code=500)
-
-    # Continue existing flow (rewriting etc.) — unchanged below
+    # Rewrite with LLM
     try:
         rewritten = rewrite_with_openai(bullets, job_description)
     except Exception as e:
@@ -428,10 +351,16 @@ async def rewrite(file: UploadFile = File(...), job_description: str = Form(...)
         log.error(f"Bullet count mismatch: in={len(paras)} out={len(rewritten)}")
         return JSONResponse({"error": "bullet_count_mismatch", "in": len(paras), "out": len(rewritten)}, status_code=500)
 
+    # Enforce per-bullet character caps with reprompting
     edited = 0
     for idx, (p, new_text) in enumerate(zip(paras, rewritten)):
         try:
-            set_paragraph_text_with_selective_links(p, new_text)  # keep as-is; enforcement handled later if you choose
+            capped = enforce_char_cap_with_reprompt(bullets[idx], new_text)
+            log.info(
+                f"bullet[{idx}] orig_len={len(bullets[idx])} rew_len={len(new_text)} "
+                f"final_len={len(capped)} cap={len(bullets[idx])+SLACK_CHARS}"
+            )
+            set_paragraph_text_with_selective_links(p, capped)
             edited += 1
         except Exception as e:
             log.exception("Failed applying paragraph edit")
@@ -439,12 +368,14 @@ async def rewrite(file: UploadFile = File(...), job_description: str = Form(...)
 
     log.info(f"Applied edits to {edited} paragraphs")
 
+    # Layout cleanup
     try:
         enforce_single_page(doc)
     except Exception as e:
         log.exception("enforce_single_page failed")
         return JSONResponse({"error": "layout_failed", "detail": str(e)}, status_code=500)
 
+    # Save DOCX
     try:
         buf = BytesIO(); doc.save(buf); data = buf.getvalue()
         log.info(f"Returning DOCX bytes={len(data)} sha256={hashlib.sha256(data).hexdigest()}")
@@ -456,41 +387,3 @@ async def rewrite(file: UploadFile = File(...), job_description: str = Form(...)
     except Exception as e:
         log.exception("Failed to serialize DOCX")
         return JSONResponse({"error": "serialize_failed", "detail": str(e)}, status_code=500)
-
-# ---------- NEW: measurement-only debug endpoint ----------
-@app.post("/measure_debug")
-async def measure_debug(file: UploadFile = File(...)):
-    raw = await file.read()
-    try:
-        doc = Document(BytesIO(raw))
-    except Exception as e:
-        log.exception("measure_debug: bad_docx")
-        return JSONResponse({"error": "bad_docx", "detail": str(e)}, status_code=400)
-
-    results = []
-    idx = 0
-    for p in doc.paragraphs:
-        pPr = p._p.pPr
-        is_list = (
-            (pPr is not None)
-            and (getattr(pPr, "numPr", None) is not None)
-            and (getattr(pPr.numPr, "numId", None) is not None)
-            and (getattr(pPr.numPr.numId, "val", None) is not None)
-        )
-        if is_list and p.text.strip():
-            fn, sz = _para_font(p)
-            w_other, w_first = _para_usable_width_in(doc, p)
-            lines = _measure_lines(p.text.strip(), fn, sz, w_first, w_other)
-            results.append({
-                "i": idx,
-                "font": fn,
-                "size_pt": sz,
-                "width_first_in": w_first,
-                "width_other_in": w_other,
-                "lines": lines,
-                "text": p.text.strip()[:200]
-            })
-            idx += 1
-
-    log.info(f"measure_debug bullets={len(results)} lines={[r['lines'] for r in results]}")
-    return JSONResponse({"bullets": results})

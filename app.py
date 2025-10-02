@@ -255,6 +255,9 @@ def enforce_char_cap_with_reprompt(orig_text: str, rewritten: str, *, tries: int
     Ensure rewritten <= len(orig)+SLACK_CHARS.
     Reprompts with a hard cap. Final guard truncates if still long.
     """
+
+    log.info(f"This bullet: '{orig_text}' is being shortened.")
+
     cap = max(1, len(orig_text) + SLACK_CHARS)
     cur = (rewritten or "").strip().lstrip("-• ").strip()
 

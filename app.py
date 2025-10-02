@@ -231,7 +231,7 @@ def rewrite_with_openai(bullets: List[str], job_description: str) -> List[str]:
     prompt = f"""You are a professional recruiter for the role below. Rewrite the bullets to be results-driven, quantified, and ATS-friendly.
 Constraints:
 - Keep each bullet concise. Do not add extra sentences or clauses.
-Return exactly one rewritten bullet per line. No numbering. No extra text.
+Return exactly one rewritten bullet per line.
 
 Job Description:
 {job_description}

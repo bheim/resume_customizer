@@ -287,7 +287,7 @@ def enforce_char_cap_with_reprompt(orig_text: str, rewritten: str, *, tries: int
         prompt = (
             f"Rewrite this resume bullet in no more than {cap} characters. "
             "Preserve all numbers and the core result. "
-            "Use one concise clause. No filler. "
+            "Be concise. "
             "Return only the bullet text, no dash, no quotes.\n\n"
             f"Bullet:\n{cur}"
         )

@@ -5,6 +5,7 @@ from io import BytesIO
 from copy import deepcopy
 from typing import List
 import sys
+from math import ceil
 
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,8 +28,27 @@ logging.basicConfig(
 log = logging.getLogger("resume")
 log.propagate = True
 
-# -------------------- Config --------------------
-SLACK_CHARS = int(os.getenv("SLACK_CHARS", "25"))
+# -------------------- Caps & line model --------------------
+# Characters-per-line benchmark (user can override)
+CPL = int(os.getenv("CHARS_PER_LINE", "100"))
+
+# Tier thresholds and caps (expansion allowed within tier)
+CPL_TIER_1_MAX = int(os.getenv("CPL_TIER_1_MAX", "110"))  # if orig_len <= 110 -> cap=100
+CPL_TIER_2_MAX = int(os.getenv("CPL_TIER_2_MAX", "210"))  # if 110 < orig_len <= 210 -> cap=200
+CAP_LINE_1 = int(os.getenv("CAP_LINE_1", "100"))
+CAP_LINE_2 = int(os.getenv("CAP_LINE_2", "200"))
+CAP_LINE_3 = int(os.getenv("CAP_LINE_3", "300"))
+
+def tiered_char_cap(orig_len: int) -> int:
+    if orig_len <= CPL_TIER_1_MAX:
+        return CAP_LINE_1
+    if orig_len <= CPL_TIER_2_MAX:
+        return CAP_LINE_2
+    return CAP_LINE_3
+
+def est_lines(n_chars: int) -> int:
+    # Estimated visual lines using CPL heuristic
+    return max(1, ceil(n_chars / max(1, CPL)))
 
 # -------------------- Globals --------------------
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -48,7 +68,16 @@ app.add_middleware(
 # -------------------- Health --------------------
 @app.get("/")
 def root():
-    return {"status": "ok", "openai": bool(OPENAI_KEY)}
+    return {
+        "status": "ok",
+        "openai": bool(OPENAI_KEY),
+        "cpl": CPL,
+        "tiers": {
+            "tier1_max": CPL_TIER_1_MAX, "cap1": CAP_LINE_1,
+            "tier2_max": CPL_TIER_2_MAX, "cap2": CAP_LINE_2,
+            "cap3": CAP_LINE_3
+        }
+    }
 
 # -------------------- Debug: echo upload bytes --------------------
 @app.post("/echo")
@@ -63,7 +92,7 @@ async def echo(file: UploadFile = File(...)):
     log.info(f"/echo: {info}")
     return JSONResponse(info)
 
-# -------------------- Debug: structure probe (numbering, glyphs, tables) --------------------
+# -------------------- Debug: structure probe --------------------
 @app.post("/probe2")
 async def probe2(file: UploadFile = File(...)):
     BULLET_CHARS = {"•","·","-","–","—","◦","●","*"}
@@ -74,7 +103,6 @@ async def probe2(file: UploadFile = File(...)):
         log.exception("Probe2: failed to open DOCX")
         return JSONResponse({"error": "bad_docx", "detail": str(e)}, status_code=400)
 
-    # Numbering XML presence
     numpart = getattr(d.part, "numbering_part", None)
     ns = {"w": W_NS}
     num_counts = {"num": 0, "abstractNum": 0}
@@ -83,7 +111,6 @@ async def probe2(file: UploadFile = File(...)):
         num_counts["num"] = len(root.findall(".//w:num", namespaces=ns))
         num_counts["abstractNum"] = len(root.findall(".//w:abstractNum", namespaces=ns))
 
-    # Body paragraphs: numbered vs glyph-like
     total_body = len(d.paragraphs)
     word_list_count = 0
     glyph_like = 0
@@ -104,7 +131,6 @@ async def probe2(file: UploadFile = File(...)):
             if len(glyph_samples) < 5:
                 glyph_samples.append(t[:120])
 
-    # Paragraphs inside tables
     table_paras = 0
     table_samples = []
     for tbl in d.tables:
@@ -200,7 +226,6 @@ def set_paragraph_text_with_selective_links(p, new_text):
 
 def enforce_single_page(doc: Document):
     body = doc.element.body
-    # remove explicit page breaks and pageBreakBefore
     for p in doc.paragraphs:
         for br in list(p._element.findall(f".//{{{W_NS}}}br")):
             if br.get(qn('w:type')) == 'page':
@@ -209,7 +234,6 @@ def enforce_single_page(doc: Document):
         if pPr is not None:
             for pb in list(pPr.findall(f"./{{{W_NS}}}pageBreakBefore")):
                 pPr.remove(pb)
-    # make all sections continuous
     for sectPr in body.findall(f".//{{{W_NS}}}sectPr"):
         t = sectPr.find(f"./{{{W_NS}}}type") or OxmlElement('w:type')
         t.set(qn('w:val'), 'continuous')
@@ -219,7 +243,6 @@ def enforce_single_page(doc: Document):
             doc.sections[-1].start_type = WD_SECTION_START.CONTINUOUS
     except Exception:
         pass
-    # trim trailing empties
     def _body_p(): return body.findall(f"./{{{W_NS}}}p")
     while len(_body_p())>1 and not doc.paragraphs[-1].text.strip():
         body.remove(doc.paragraphs[-1]._element)
@@ -231,7 +254,7 @@ def rewrite_with_openai(bullets: List[str], job_description: str) -> List[str]:
     prompt = f"""You are a professional recruiter for the role below. Rewrite the bullets to be results-driven, quantified, and ATS-friendly.
 Constraints:
 - Keep each bullet concise. Do not add extra sentences or clauses.
-Return exactly one rewritten bullet per line.
+Return exactly one rewritten bullet per line. No numbering. No extra text.
 
 Job Description:
 {job_description}
@@ -249,29 +272,21 @@ Bullets:
     log.info(f"OpenAI response lines: {len(lines)}")
     return lines
 
-# -------------------- Char-cap enforcement --------------------
+# -------------------- Cap enforcer (tiered) --------------------
 def enforce_char_cap_with_reprompt(orig_text: str, rewritten: str, *, tries: int = 3) -> str:
-    """
-    Ensure rewritten <= len(orig)+SLACK_CHARS.
-    Reprompts with a hard cap. Final guard truncates if still long.
-    """
-
-    log.info(f"This bullet: '{orig_text}' is being shortened.")
-
-    cap = max(1, len(orig_text) + SLACK_CHARS)
+    cap = tiered_char_cap(len(orig_text))
     cur = (rewritten or "").strip().lstrip("-• ").strip()
 
     if not client:
         return cur[:cap].rstrip()
 
-    # fast pass: if already within cap, just trim whitespace and return
     if len(cur) <= cap:
         return cur
 
     for t in range(tries):
         prompt = (
             f"Rewrite this resume bullet in no more than {cap} characters. "
-            "Preserve all numbers and the core outcome. "
+            "Preserve all numbers and the core result. "
             "Use one concise clause. No filler. "
             "Return only the bullet text, no dash, no quotes.\n\n"
             f"Bullet:\n{cur}"
@@ -282,27 +297,25 @@ def enforce_char_cap_with_reprompt(orig_text: str, rewritten: str, *, tries: int
             temperature=0
         )
         nxt = r.choices[0].message.content.strip().lstrip("-• ").strip()
-        log.info(f"charcap reprompt try={t+1} cap={cap} prev_len={len(cur)} new_len={len(nxt)}")
+        log.info(f"tiercap reprompt try={t+1} cap={cap} prev_len={len(cur)} new_len={len(nxt)}")
         cur = nxt
         if len(cur) <= cap:
             break
 
     if len(cur) > cap:
-        log.info(f"charcap truncate len={len(cur)} -> cap={cap}")
+        log.info(f"tiercap truncate len={len(cur)} -> cap={cap}")
         cur = cur[:cap].rstrip()
     return cur
 
 # -------------------- Main endpoint --------------------
 @app.post("/rewrite")
 async def rewrite(file: UploadFile = File(...), job_description: str = Form(...)):
-    # Read upload
     raw = await file.read()
     size = len(raw)
     ct = file.content_type
     sha = hashlib.sha256(raw).hexdigest()
     log.info(f"/rewrite: recv filename='{file.filename}' ct='{ct}' size={size} sha256={sha} jd_len={len(job_description)}")
 
-    # Validate upload
     if not raw or size < 512:
         log.warning("Upload too small or empty")
         return JSONResponse({"error": "empty_or_small_file", "size": size}, status_code=400)
@@ -314,14 +327,13 @@ async def rewrite(file: UploadFile = File(...), job_description: str = Form(...)
         log.warning(f"Unexpected content-type: {ct}")
         return JSONResponse({"error": "bad_content_type", "got": ct}, status_code=415)
 
-    # Open DOCX
     try:
         doc = Document(BytesIO(raw))
     except Exception as e:
         log.exception("Failed to open DOCX")
         return JSONResponse({"error": "bad_docx", "detail": str(e)}, status_code=400)
 
-    # Collect bullets (strict Word-numbered lists in body)
+    # Collect bullets (Word-numbered list paragraphs)
     bullets, paras = [], []
     for p in doc.paragraphs:
         pPr = p._p.pPr
@@ -343,7 +355,7 @@ async def rewrite(file: UploadFile = File(...), job_description: str = Form(...)
         log.warning(f"No bullets found. First_paragraphs_sample={sample}")
         return JSONResponse({"error": "no_bullets_found"}, status_code=422)
 
-    # Rewrite with LLM
+    # Rewrite
     try:
         rewritten = rewrite_with_openai(bullets, job_description)
     except Exception as e:
@@ -354,15 +366,26 @@ async def rewrite(file: UploadFile = File(...), job_description: str = Form(...)
         log.error(f"Bullet count mismatch: in={len(paras)} out={len(rewritten)}")
         return JSONResponse({"error": "bullet_count_mismatch", "in": len(paras), "out": len(rewritten)}, status_code=500)
 
-    # Enforce per-bullet character caps with reprompting
+    # Apply with tiered caps and log estimated line counts
     edited = 0
     for idx, (p, new_text) in enumerate(zip(paras, rewritten)):
         try:
-            capped = enforce_char_cap_with_reprompt(bullets[idx], new_text)
+            orig = bullets[idx]
+            cap = tiered_char_cap(len(orig))
+
+            capped = enforce_char_cap_with_reprompt(orig, new_text)
+
+            # Estimated lines using CPL heuristic
+            orig_lines_est = est_lines(len(orig))
+            final_lines_est = est_lines(len(capped))
+
             log.info(
-                f"bullet[{idx}] orig_len={len(bullets[idx])} rew_len={len(new_text)} "
-                f"final_len={len(capped)} cap={len(bullets[idx])+SLACK_CHARS}"
+                f"bullet[{idx}] "
+                f"orig_len={len(orig)} orig_lines_est={orig_lines_est} "
+                f"rew_len={len(new_text)} -> final_len={len(capped)} final_lines_est={final_lines_est} "
+                f"cap={cap} cpl={CPL}"
             )
+
             set_paragraph_text_with_selective_links(p, capped)
             edited += 1
         except Exception as e:

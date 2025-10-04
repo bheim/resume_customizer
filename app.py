@@ -1,10 +1,13 @@
 import os
+import sys
 import logging
 import hashlib
+import base64
 from io import BytesIO
 from copy import deepcopy
-from typing import List, Tuple
-import sys
+from typing import List, Tuple, Optional
+from math import ceil
+import re
 
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,10 +30,20 @@ logging.basicConfig(
 log = logging.getLogger("resume")
 log.propagate = True
 
-# -------------------- Globals --------------------
-W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+# -------------------- OpenAI --------------------
 OPENAI_KEY = os.environ.get("OPENAI_API_KEY")
 client = OpenAI(api_key=OPENAI_KEY) if OPENAI_KEY else None
+EMBED_MODEL = os.getenv("EMBED_MODEL", "text-embedding-3-small")
+CHAT_MODEL = os.getenv("CHAT_MODEL", "gpt-4o-mini")
+
+# -------------------- Tiers and overrides --------------------
+CPL_DEFAULT = int(os.getenv("CHARS_PER_LINE", "100"))
+TIER_SLACK_DEFAULT = int(os.getenv("TIER_SLACK", "10"))
+REPROMPT_TRIES = int(os.getenv("REPROMPT_TRIES", "3"))
+
+W_EMB = float(os.getenv("W_EMB", "0.4"))
+W_KEY = float(os.getenv("W_KEY", "0.2"))
+W_LLM = float(os.getenv("W_LLM", "0.4"))
 
 # -------------------- FastAPI --------------------
 app = FastAPI()
@@ -45,9 +58,17 @@ app.add_middleware(
 # -------------------- Health --------------------
 @app.get("/")
 def root():
-    return {"status": "ok", "openai": bool(OPENAI_KEY)}
+    return {
+        "status": "ok",
+        "openai": bool(OPENAI_KEY),
+        "models": {"embed": EMBED_MODEL, "chat": CHAT_MODEL},
+        "weights": {"emb": W_EMB, "keywords": W_KEY, "llm": W_LLM},
+        "defaults": {"chars_per_line": CPL_DEFAULT, "tier_slack": TIER_SLACK_DEFAULT, "reprompt_tries": REPROMPT_TRIES},
+    }
 
-# -------------------- Word helpers --------------------
+# -------------------- DOCX helpers --------------------
+W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
 def _collect_links(p):
     links, p_el = [], p._p
     for h in p_el.findall(f".//{{{W_NS}}}hyperlink"):
@@ -156,37 +177,63 @@ def enforce_single_page(doc: Document):
     while len(_body_p()) > 1 and not doc.paragraphs[-1].text.strip():
         body.remove(doc.paragraphs[-1]._element)
 
-# -------------------- Character Cap Enforcement --------------------
-def get_char_cap(original_len: int, override: int = None) -> int:
-    if override:
-        return override
-    if original_len <= 110:
-        return 100
-    elif original_len <= 210:
-        return 200
-    else:
-        return 300
+# -------------------- Bullet discovery --------------------
+def collect_word_numbered_bullets(doc: Document) -> Tuple[List[str], List]:
+    bullets, paras = [], []
+    for p in doc.paragraphs:
+        pPr = p._p.pPr
+        if not (
+            (pPr is not None)
+            and (getattr(pPr, "numPr", None) is not None)
+            and (getattr(pPr.numPr, "numId", None) is not None)
+            and (getattr(pPr.numPr.numId, "val", None) is not None)
+        ):
+            continue
+        text = p.text.strip()
+        if text:
+            bullets.append(text)
+            paras.append(p)
+    return bullets, paras
 
-def enforce_char_cap_with_reprompt(text: str, cap: int) -> str:
-    cur = text.strip().lstrip("-• ").strip()
-    tries = 0
-    while len(cur) > cap and tries < 3:
+# -------------------- Tiered caps --------------------
+def tiered_char_cap(orig_len: int, override: Optional[int] = None) -> int:
+    if override and override > 0:
+        return override
+    if orig_len <= 110:
+        return 100
+    if orig_len <= 210:
+        return 200
+    return 300
+
+def enforce_char_cap_with_reprompt(cur: str, cap: int) -> str:
+    text = (cur or "").strip().lstrip("-• ").strip()
+    if not client:
+        return text[:cap].rstrip()
+    if len(text) <= cap:
+        return text
+    for t in range(REPROMPT_TRIES):
         prompt = (
             f"Rewrite this resume bullet in {cap} characters or fewer. "
-            f"Preserve numbers and core results. No fluff. Return only the bullet.\n\nBullet:\n{cur}"
+            "Preserve numbers and the core result. Use one concise clause. No filler. "
+            "Return only the bullet text, no dash, no quotes.\n\n"
+            f"Bullet:\n{text}"
         )
         r = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=CHAT_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0
         )
-        cur = r.choices[0].message.content.strip().lstrip("-• ").strip()
-        tries += 1
-    if len(cur) > cap:
-        cur = cur[:cap].rstrip()
-    return cur
+        nxt = r.choices[0].message.content.strip().lstrip("-• ").strip()
+        log.info(f"reprompt try={t+1} cap={cap} prev_len={len(text)} new_len={len(nxt)}")
+        text = nxt
+        if len(text) <= cap:
+            break
+    if len(text) > cap:
+        log.info(f"truncate len={len(text)} -> cap={cap}")
+        text = text[:cap].rstrip()
+    return text
 
-# -------------------- OpenAI call --------------------
+# -------------------- Rewrite prompt --------------------
 def rewrite_with_openai(bullets: List[str], job_description: str) -> List[str]:
     if not client:
         raise RuntimeError("OPENAI_API_KEY missing")
@@ -205,7 +252,7 @@ Bullets:
 Return only the rewritten bullets, one per line, in the same order. No numbering. No extra text."""
     log.info(f"OpenAI request: bullets={len(bullets)}, jd_chars={len(job_description)}")
     r = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model=CHAT_MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.2
     )
@@ -214,51 +261,143 @@ Return only the rewritten bullets, one per line, in the same order. No numbering
     log.info(f"OpenAI response lines: {len(lines)}")
     return lines
 
-# -------------------- Main endpoint --------------------
+# -------------------- Scoring utilities --------------------
+STOPWORDS = set("""
+a an the and or for of to in on at by with from as is are was were be been being
+this that these those such into across over under within without not no nor than
+your you we they he she it their our us
+""".split())
+
+TOKEN_RE = re.compile(r"[A-Za-z0-9+#\-\.]+")
+
+def simple_tokens(text: str) -> List[str]:
+    toks = [t.lower() for t in TOKEN_RE.findall(text)]
+    return [t for t in toks if len(t) > 1 and t not in STOPWORDS]
+
+def keyword_set(text: str) -> set:
+    toks = simple_tokens(text)
+    return set([t for t in toks if any(c.isalpha() for c in t) and len(t) >= 3])
+
+def keyword_coverage(resume_text: str, jd_text: str) -> float:
+    rset = keyword_set(resume_text)
+    jset = keyword_set(jd_text)
+    if not jset:
+        return 0.0
+    hits = len(jset & rset)
+    return hits / len(jset)
+
+def embed(text: str) -> List[float]:
+    if not client:
+        return []
+    resp = client.embeddings.create(model=EMBED_MODEL, input=text)
+    return resp.data[0].embedding
+
+def cosine(a: List[float], b: List[float]) -> float:
+    if not a or not b:
+        return 0.0
+    s = sum(x*y for x, y in zip(a, b))
+    na = sum(x*x for x in a) ** 0.5
+    nb = sum(y*y for y in b) ** 0.5
+    if na == 0 or nb == 0:
+        return 0.0
+    return s / (na * nb)
+
+def llm_fit_score(resume_text: str, jd_text: str) -> float:
+    if not client:
+        return 0.0
+    prompt = f"""You are a strict recruiter. Score how well the RESUME matches the JOB DESCRIPTION on a 0–100 scale.
+Rules:
+- Consider skill and domain alignment, scope, seniority, quantified impact, tools/tech, and responsibilities.
+- Do NOT reward content not present in the resume text.
+- Return ONLY a number 0–100, no commentary.
+
+JOB DESCRIPTION:
+{jd_text}
+
+RESUME:
+{resume_text}
+"""
+    r = client.chat.completions.create(
+        model=CHAT_MODEL,
+        messages=[{"role":"user","content":prompt}],
+        temperature=0
+    )
+    out = (r.choices[0].message.content or "").strip()
+    m = re.search(r"(\d{1,3})", out)
+    if not m:
+        return 0.0
+    val = int(m.group(1))
+    val = max(0, min(100, val))
+    return float(val)
+
+def composite_score(resume_text: str, jd_text: str) -> dict:
+    emb_r = embed(resume_text)
+    emb_j = embed(jd_text)
+    sim = cosine(emb_r, emb_j)
+    key = keyword_coverage(resume_text, jd_text)
+    llm = llm_fit_score(resume_text, jd_text) / 100.0
+    score = W_EMB*sim + W_KEY*key + W_LLM*llm
+    return {
+        "embed_sim": round(sim, 4),
+        "keyword_cov": round(key, 4),
+        "llm_score": round(llm*100.0, 1),
+        "composite": round(score*100.0, 1),
+    }
+
+# -------------------- Endpoint: rewrite --------------------
 @app.post("/rewrite")
-async def rewrite(file: UploadFile = File(...), job_description: str = Form(...), max_chars_override: int = Form(None)):
+async def rewrite(
+    file: UploadFile = File(...),
+    job_description: str = Form(...),
+    max_chars_override: Optional[int] = Form(None)
+):
     raw = await file.read()
+    size = len(raw)
+    ct = file.content_type
+    sha = hashlib.sha256(raw).hexdigest()
+    log.info(f"/rewrite: recv filename='{file.filename}' ct='{ct}' size={size} sha256={sha} jd_len={len(job_description)} override={max_chars_override}")
+
+    if not raw or size < 512:
+        return JSONResponse({"error":"empty_or_small_file"}, status_code=400)
+    if ct not in {
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/octet-stream",
+        "application/msword",
+    }:
+        return JSONResponse({"error":"bad_content_type","got":ct}, status_code=415)
+
     try:
         doc = Document(BytesIO(raw))
     except Exception as e:
-        log.exception("Failed to open DOCX")
-        return JSONResponse({"error": "bad_docx", "detail": str(e)}, status_code=400)
+        log.exception("bad_docx")
+        return JSONResponse({"error":"bad_docx","detail":str(e)}, status_code=400)
 
-    bullets, paras = [], []
-    for p in doc.paragraphs:
-        pPr = p._p.pPr
-        is_list = (
-            (pPr is not None)
-            and (getattr(pPr, "numPr", None) is not None)
-            and (getattr(pPr.numPr, "numId", None) is not None)
-            and (getattr(pPr.numPr.numId, "val", None) is not None)
-        )
-        if is_list and p.text.strip():
-            bullets.append(p.text.strip())
-            paras.append(p)
-
+    bullets, paras = collect_word_numbered_bullets(doc)
     if not bullets:
-        return JSONResponse({"error": "no_bullets_found"}, status_code=422)
+        return JSONResponse({"error":"no_bullets_found"}, status_code=422)
 
-    rewritten = rewrite_with_openai(bullets, job_description)
+    try:
+        rewritten = rewrite_with_openai(bullets, job_description)
+    except Exception as e:
+        log.exception("openai_failed")
+        return JSONResponse({"error":"openai_failed","detail":str(e)}, status_code=502)
 
     if len(rewritten) != len(paras):
-        return JSONResponse({"error": "bullet_count_mismatch"}, status_code=500)
+        return JSONResponse({"error":"bullet_count_mismatch","in":len(paras),"out":len(rewritten)}, status_code=500)
 
     edited = 0
     for idx, (p, orig, new_text) in enumerate(zip(paras, bullets, rewritten)):
-        cap = get_char_cap(len(orig), max_chars_override)
+        cap = tiered_char_cap(len(orig), max_chars_override)
         fitted = enforce_char_cap_with_reprompt(new_text, cap)
         set_paragraph_text_with_selective_links(p, fitted)
-        log.info(f"Bullet {idx}: orig_len={len(orig)}, cap={cap}, final_len={len(fitted)}, text='{fitted[:80]}...'")
+        log.info(f"bullet[{idx}] orig_len={len(orig)} cap={cap} final_len={len(fitted)}")
         edited += 1
 
     enforce_single_page(doc)
-    buf = BytesIO()
-    doc.save(buf)
-    data = buf.getvalue()
+    buf = BytesIO(); doc.save(buf); data = buf.getvalue()
+    log.info(f"Returning DOCX bytes={len(data)} sha256={hashlib.sha256(data).hexdigest()}")
     return Response(
         content=data,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": 'attachment; filename="resume_edited.docx"'}
+        headers={"Content-Disposition": 'attachment; filename=\"resume_edited.docx\"'}
     )

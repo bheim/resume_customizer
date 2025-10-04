@@ -8,6 +8,7 @@ from copy import deepcopy
 from typing import List, Tuple, Optional
 from math import ceil
 import re
+from collections import Counter
 
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -233,41 +234,12 @@ def enforce_char_cap_with_reprompt(cur: str, cap: int) -> str:
         text = text[:cap].rstrip()
     return text
 
-# -------------------- Rewrite prompt --------------------
-def rewrite_with_openai(bullets: List[str], job_description: str) -> List[str]:
-    if not client:
-        raise RuntimeError("OPENAI_API_KEY missing")
-    prompt = f"""You are an expert resume editor.
-Rewrite each bullet to emphasize outcomes, impact, and quantifiable results.
-Align language directly to the Job Description by naturally incorporating its key terms and phrases.
-Preserve facts, metrics, and scope. Do not invent achievements. Keep voice, tense, and person consistent with the original.
-Optimize for ATS scanning: clear action verbs, nouns from the JD, minimal fluff.
-
-Job Description:
-{job_description}
-
-Bullets:
-{chr(10).join(f"- {b}" for b in bullets)}
-
-Return only the rewritten bullets, one per line, in the same order. No numbering. No extra text."""
-    log.info(f"OpenAI request: bullets={len(bullets)}, jd_chars={len(job_description)}")
-    r = client.chat.completions.create(
-        model=CHAT_MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.2
-    )
-    text = r.choices[0].message.content.strip()
-    lines = [line.strip("- ").strip() for line in text.splitlines() if line.strip()]
-    log.info(f"OpenAI response lines: {len(lines)}")
-    return lines
-
-# -------------------- Scoring utilities --------------------
+# -------------------- Keyword utilities --------------------
 STOPWORDS = set("""
 a an the and or for of to in on at by with from as is are was were be been being
 this that these those such into across over under within without not no nor than
 your you we they he she it their our us
 """.split())
-
 TOKEN_RE = re.compile(r"[A-Za-z0-9+#\-\.]+")
 
 def simple_tokens(text: str) -> List[str]:
@@ -286,6 +258,13 @@ def keyword_coverage(resume_text: str, jd_text: str) -> float:
     hits = len(jset & rset)
     return hits / len(jset)
 
+def top_terms(text: str, k: int = 25) -> List[str]:
+    toks = [t for t in simple_tokens(text) if any(c.isalpha() for c in t) and len(t) >= 3]
+    freq = Counter(toks)
+    # prefer multi-char, de-duplicate by frequency
+    return [t for t, _ in freq.most_common(k)]
+
+# -------------------- Embedding + scoring --------------------
 def embed(text: str) -> List[float]:
     if not client:
         return []
@@ -343,6 +322,43 @@ def composite_score(resume_text: str, jd_text: str) -> dict:
         "llm_score": round(llm*100.0, 1),
         "composite": round(score*100.0, 1),
     }
+
+# -------------------- Rewrite prompt (JD-term targeted) --------------------
+def rewrite_with_openai(bullets: List[str], job_description: str) -> List[str]:
+    if not client:
+        raise RuntimeError("OPENAI_API_KEY missing")
+
+    jd_terms = top_terms(job_description, k=25)
+    terms_line = ", ".join(jd_terms)
+
+    prompt = f"""You are an expert resume editor.
+For each bullet:
+- Preserve facts and metrics. Do not invent.
+- Align to the Job Description by adding 2–4 high-value terms from the JD that are currently missing from the bullet, but only if they truthfully apply.
+- Prefer exact nouns/phrases from the JD over synonyms when accurate.
+- Structure: outcome → metric → tool/domain term.
+- Keep concise and impactful. Avoid filler. Do not change tense/person.
+
+Job Description:
+{job_description}
+
+Target JD terms to consider (use only if accurate):
+{terms_line}
+
+Bullets:
+{chr(10).join(f"- {b}" for b in bullets)}
+
+Return only the rewritten bullets, one per line, same order, no numbering, no extra text."""
+    log.info(f"OpenAI request: bullets={len(bullets)}, jd_chars={len(job_description)} | jd_terms={len(jd_terms)}")
+    r = client.chat.completions.create(
+        model=CHAT_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.3
+    )
+    text = r.choices[0].message.content.strip()
+    lines = [line.strip("- ").strip() for line in text.splitlines() if line.strip()]
+    log.info(f"OpenAI response lines: {len(lines)}")
+    return lines
 
 # -------------------- Endpoint: rewrite (DOCX) --------------------
 @app.post("/rewrite")

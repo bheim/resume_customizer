@@ -5,10 +5,11 @@ import hashlib
 import base64
 from io import BytesIO
 from copy import deepcopy
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 from math import ceil
 import re
 from collections import Counter
+from json import loads
 
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -37,11 +38,15 @@ client = OpenAI(api_key=OPENAI_KEY) if OPENAI_KEY else None
 EMBED_MODEL = os.getenv("EMBED_MODEL", "text-embedding-3-small")
 CHAT_MODEL = os.getenv("CHAT_MODEL", "gpt-4o-mini")
 
-# -------------------- Tiers and overrides --------------------
-CPL_DEFAULT = int(os.getenv("CHARS_PER_LINE", "100"))
-TIER_SLACK_DEFAULT = int(os.getenv("TIER_SLACK", "10"))
+# -------------------- Feature toggles --------------------
+USE_LLM_TERMS = os.getenv("USE_LLM_TERMS", "1") == "1"
+USE_DISTILLED_JD = os.getenv("USE_DISTILLED_JD", "1") == "1"
+W_DISTILLED = float(os.getenv("W_DISTILLED", "0.7"))  # weight for distilled JD in semantic sim
+
+# -------------------- Caps and retries --------------------
 REPROMPT_TRIES = int(os.getenv("REPROMPT_TRIES", "3"))
 
+# -------------------- Scoring weights --------------------
 W_EMB = float(os.getenv("W_EMB", "0.4"))
 W_KEY = float(os.getenv("W_KEY", "0.2"))
 W_LLM = float(os.getenv("W_LLM", "0.4"))
@@ -63,8 +68,9 @@ def root():
         "status": "ok",
         "openai": bool(OPENAI_KEY),
         "models": {"embed": EMBED_MODEL, "chat": CHAT_MODEL},
-        "weights": {"emb": W_EMB, "keywords": W_KEY, "llm": W_LLM},
-        "defaults": {"chars_per_line": CPL_DEFAULT, "tier_slack": TIER_SLACK_DEFAULT, "reprompt_tries": REPROMPT_TRIES},
+        "weights": {"emb": W_EMB, "keywords": W_KEY, "llm": W_LLM, "semantic_distilled_weight": W_DISTILLED},
+        "features": {"use_llm_terms": USE_LLM_TERMS, "use_distilled_jd": USE_DISTILLED_JD},
+        "reprompt_tries": REPROMPT_TRIES,
     }
 
 # -------------------- DOCX helpers --------------------
@@ -82,8 +88,7 @@ def _collect_links(p):
             if rPr is not None and rPr_template is None:
                 rPr_template = deepcopy(rPr)
         anchor_text = "".join(r_texts).strip()
-        r_id = h.get(qn("r:id"))
-        url = None
+        r_id = h.get(qn("r:id")); url = None
         if r_id:
             try:
                 rel = p.part.rels[r_id]
@@ -122,37 +127,28 @@ def set_paragraph_text_with_selective_links(p, new_text):
         break
     links = _collect_links(p)
     anchors = sorted(links, key=lambda d: len(d["text"]), reverse=True)
-    lower = new_text.lower()
-    spans, i = [], 0
+    lower = new_text.lower(); spans=[]; i=0
     while i < len(new_text):
-        match = None
+        match=None
         for lk in anchors:
-            a = lk["text"]
-            al = a.lower()
+            a=lk["text"]; al=a.lower()
             if lower.startswith(al, i):
-                match = (i, i + len(a), lk)
-                break
+                match=(i, i+len(a), lk); break
         if match:
-            spans.append(match)
-            i = match[1]
+            spans.append(match); i=match[1]
         else:
-            next_pos = len(new_text)
+            next_pos=len(new_text)
             for lk in anchors:
-                j = lower.find(lk["text"].lower(), i)
-                if j != -1:
-                    next_pos = min(next_pos, j)
-            spans.append((i, next_pos, None))
-            i = next_pos
+                j=lower.find(lk["text"].lower(), i)
+                if j!=-1: next_pos=min(next_pos, j)
+            spans.append((i, next_pos, None)); i=next_pos
     for child in list(p_el):
         if child.tag != f"{{{W_NS}}}pPr":
             p_el.remove(child)
-    for start, end, lk in spans:
-        seg = new_text[start:end]
-        if not seg:
-            continue
-        p_el.append(
-            _make_hyperlink_run(p, seg, lk["url"], lk["rPr"] or tmpl) if lk else _make_run(seg, tmpl)
-        )
+    for start,end,lk in spans:
+        seg=new_text[start:end]
+        if not seg: continue
+        p_el.append(_make_hyperlink_run(p, seg, lk["url"], lk["rPr"] or tmpl) if lk else _make_run(seg, tmpl))
 
 def enforce_single_page(doc: Document):
     body = doc.element.body
@@ -175,7 +171,7 @@ def enforce_single_page(doc: Document):
     except Exception:
         pass
     def _body_p(): return body.findall(f"./{{{W_NS}}}p")
-    while len(_body_p()) > 1 and not doc.paragraphs[-1].text.strip():
+    while len(_body_p())>1 and not doc.paragraphs[-1].text.strip():
         body.remove(doc.paragraphs[-1]._element)
 
 # -------------------- Bullet discovery --------------------
@@ -234,7 +230,7 @@ def enforce_char_cap_with_reprompt(cur: str, cap: int) -> str:
         text = text[:cap].rstrip()
     return text
 
-# -------------------- Keyword utilities --------------------
+# -------------------- Keyword + scoring utilities --------------------
 STOPWORDS = set("""
 a an the and or for of to in on at by with from as is are was were be been being
 this that these those such into across over under within without not no nor than
@@ -258,11 +254,100 @@ def keyword_coverage(resume_text: str, jd_text: str) -> float:
     hits = len(jset & rset)
     return hits / len(jset)
 
+def weighted_keyword_coverage(resume_text: str, jd_terms: Dict[str, List[str]]) -> float:
+    weights = {"tools":3, "skills":2, "responsibilities":2, "domains":2, "certifications":1, "seniority":1}
+    res_lower = resume_text.lower()
+    total_weight = 0
+    hit_weight = 0
+    for cat, terms in jd_terms.items():
+        w = weights.get(cat, 1)
+        for t in terms:
+            t_norm = t.lower().strip()
+            if not t_norm:
+                continue
+            total_weight += w
+            if t_norm in res_lower:
+                hit_weight += w
+    if total_weight == 0:
+        return 0.0
+    return hit_weight / total_weight
+
 def top_terms(text: str, k: int = 25) -> List[str]:
     toks = [t for t in simple_tokens(text) if any(c.isalpha() for c in t) and len(t) >= 3]
     freq = Counter(toks)
-    # prefer multi-char, de-duplicate by frequency
     return [t for t, _ in freq.most_common(k)]
+
+# -------------------- OpenAI helpers: distill + extract terms --------------------
+_distill_cache: Dict[str, str] = {}
+_terms_cache: Dict[str, Dict[str, List[str]]] = {}
+
+def jd_hash(jd_text: str) -> str:
+    return hashlib.sha256(jd_text.encode("utf-8")).hexdigest()
+
+def llm_distill_jd(jd_text: str) -> str:
+    if not client or not jd_text.strip():
+        return jd_text
+    h = jd_hash(jd_text)
+    if h in _distill_cache:
+        return _distill_cache[h]
+    prompt = f"""Distill the JOB DESCRIPTION into a focused role core (8–12 bullet-like lines), excluding all perks/benefits, compensation, culture, location, legal/EEO, and company boilerplate.
+Include only: core responsibilities, required skills and tools, domain focus, and seniority/scope signals.
+Return plain text only. No intro or outro.
+
+JOB DESCRIPTION:
+{jd_text}
+"""
+    r = client.chat.completions.create(
+        model=CHAT_MODEL,
+        messages=[{"role":"user","content":prompt}],
+        temperature=0
+    )
+    distilled = (r.choices[0].message.content or "").strip()
+    if not distilled or len(distilled) < 40:
+        distilled = jd_text
+    _distill_cache[h] = distilled
+    return distilled
+
+def llm_extract_terms(jd_text: str) -> Dict[str, List[str]]:
+    if not client or not jd_text.strip():
+        return {"skills": [], "tools": [], "domains": [], "responsibilities": [], "seniority": [], "certifications": []}
+    h = "terms:" + jd_hash(jd_text)
+    if h in _terms_cache:
+        return _terms_cache[h]
+    prompt = f"""Extract only role-critical keywords from the JOB DESCRIPTION as strict JSON.
+Exclude benefits, perks, location, compensation, culture, legal, EEO, and boilerplate.
+Groups:
+- skills: capabilities (e.g., stakeholder management, roadmap ownership)
+- tools: tech/frameworks/languages/platforms (e.g., SQL, Snowflake, Figma, Kubernetes)
+- domains: industries/problems (e.g., fintech risk, B2B SaaS analytics)
+- responsibilities: core duties (e.g., OKR planning, A/B testing)
+- seniority: indicators (e.g., lead, principal, staff, manager)
+- certifications: formal certs (e.g., PMP, AWS SA Pro)
+
+Output JSON ONLY with those keys and arrays. No prose.
+
+JOB DESCRIPTION:
+{jd_text}
+"""
+    r = client.chat.completions.create(
+        model=CHAT_MODEL,
+        messages=[{"role":"user","content":prompt}],
+        temperature=0
+    )
+    raw = (r.choices[0].message.content or "").strip()
+    data = {}
+    try:
+        data = loads(raw)
+    except Exception:
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.strip("`")
+            cleaned = cleaned.replace("json", "", 1).strip()
+        data = loads(cleaned)
+    out = {k: sorted(set([t.strip() for t in data.get(k, []) if isinstance(t, str) and t.strip()])) for k in
+           ["skills","tools","domains","responsibilities","seniority","certifications"]}
+    _terms_cache[h] = out
+    return out
 
 # -------------------- Embedding + scoring --------------------
 def embed(text: str) -> List[float]:
@@ -310,46 +395,81 @@ RESUME:
     return float(val)
 
 def composite_score(resume_text: str, jd_text: str) -> dict:
+    jd_for_terms = jd_text
+    jd_for_embed = jd_text
+
+    if USE_DISTILLED_JD:
+        distilled = llm_distill_jd(jd_text)
+        jd_for_embed = distilled
+    else:
+        distilled = None
+
+    # semantic similarity: mix distilled and original for stability
     emb_r = embed(resume_text)
-    emb_j = embed(jd_text)
-    sim = cosine(emb_r, emb_j)
-    key = keyword_coverage(resume_text, jd_text)
-    llm = llm_fit_score(resume_text, jd_text) / 100.0
-    score = W_EMB*sim + W_KEY*key + W_LLM*llm
-    return {
-        "embed_sim": round(sim, 4),
+    emb_j_dist = embed(jd_for_embed)
+    sim_dist = cosine(emb_r, emb_j_dist)
+    sim_orig = cosine(emb_r, embed(jd_text)) if USE_DISTILLED_JD else sim_dist
+    semantic = W_DISTILLED * sim_dist + (1.0 - W_DISTILLED) * sim_orig
+
+    # keyword coverage
+    if USE_LLM_TERMS:
+        jd_for_terms = distilled if (USE_DISTILLED_JD and distilled) else jd_text
+        terms = llm_extract_terms(jd_for_terms)
+        key = weighted_keyword_coverage(resume_text, terms)
+    else:
+        key = keyword_coverage(resume_text, jd_text)
+
+    # llm rubric
+    llm = llm_fit_score(resume_text, jd_for_terms) / 100.0
+
+    score = W_EMB*semantic + W_KEY*key + W_LLM*llm
+    out = {
+        "embed_sim": round(semantic, 4),
         "keyword_cov": round(key, 4),
         "llm_score": round(llm*100.0, 1),
         "composite": round(score*100.0, 1),
     }
+    if USE_DISTILLED_JD:
+        out["distilled_used"] = True
+    if USE_LLM_TERMS:
+        out["llm_terms_used"] = True
+    return out
 
-# -------------------- Rewrite prompt (JD-term targeted) --------------------
+# -------------------- Rewrite prompt (JD-term targeted; uses distilled JD when enabled) --------------------
 def rewrite_with_openai(bullets: List[str], job_description: str) -> List[str]:
     if not client:
         raise RuntimeError("OPENAI_API_KEY missing")
 
-    jd_terms = top_terms(job_description, k=25)
-    terms_line = ", ".join(jd_terms)
+    jd_for_terms = job_description
+    if USE_DISTILLED_JD:
+        distilled = llm_distill_jd(job_description)
+        jd_for_terms = distilled
+
+    if USE_LLM_TERMS:
+        jd_terms_struct = llm_extract_terms(jd_for_terms)
+        terms_flat = []
+        for cat in ["tools","skills","responsibilities","domains","certifications","seniority"]:
+            terms_flat.extend(jd_terms_struct.get(cat, []))
+    else:
+        terms_flat = top_terms(jd_for_terms, k=25)
+
+    terms_line = ", ".join(terms_flat[:40])
 
     prompt = f"""You are an expert resume editor.
 For each bullet:
 - Preserve facts and metrics. Do not invent.
-- Align to the Job Description by adding 2–4 high-value terms from the JD that are currently missing from the bullet, but only if they truthfully apply.
-- Prefer exact nouns/phrases from the JD over synonyms when accurate.
+- Align to the role by adding 2–4 high-value terms from the list if they truthfully apply. Prefer exact phrases over synonyms when accurate.
 - Structure: outcome → metric → tool/domain term.
 - Keep concise and impactful. Avoid filler. Do not change tense/person.
 
-Job Description:
-{job_description}
-
-Target JD terms to consider (use only if accurate):
+Role-critical terms to consider (use only if accurate):
 {terms_line}
 
-Bullets:
+Original bullets:
 {chr(10).join(f"- {b}" for b in bullets)}
 
 Return only the rewritten bullets, one per line, same order, no numbering, no extra text."""
-    log.info(f"OpenAI request: bullets={len(bullets)}, jd_chars={len(job_description)} | jd_terms={len(jd_terms)}")
+    log.info(f"OpenAI request: bullets={len(bullets)} jd_terms={len(terms_flat)} distilled_used={USE_DISTILLED_JD} llm_terms_used={USE_LLM_TERMS}")
     r = client.chat.completions.create(
         model=CHAT_MODEL,
         messages=[{"role": "user", "content": prompt}],
@@ -424,18 +544,15 @@ async def rewrite_json(
     file: UploadFile = File(...),
     job_description: str = Form(...),
     max_chars_override: Optional[int] = Form(None),
-    chars_per_line: Optional[int] = Form(None),   # optional UI hint for line estimates
-    tier_slack: Optional[int] = Form(None),       # optional UI hint for line estimates
+    chars_per_line: Optional[int] = Form(None),
+    tier_slack: Optional[int] = Form(None),
 ):
     raw = await file.read()
     size = len(raw)
     ct = file.content_type
     sha = hashlib.sha256(raw).hexdigest()
 
-    cpl_eff = int(chars_per_line) if chars_per_line else CPL_DEFAULT
-    slack_eff = int(tier_slack) if tier_slack is not None else TIER_SLACK_DEFAULT
-
-    log.info(f"/rewrite_json recv file='{file.filename}' size={size} sha256={sha} override={max_chars_override} cpl_eff={cpl_eff} tier_slack={slack_eff}")
+    log.info(f"/rewrite_json recv file='{file.filename}' size={size} sha256={sha} override={max_chars_override} llm_terms={USE_LLM_TERMS} distilled={USE_DISTILLED_JD}")
 
     if not raw or size < 512:
         return JSONResponse({"error":"empty_or_small_file"}, status_code=400)
@@ -456,10 +573,8 @@ async def rewrite_json(
     if not bullets:
         return JSONResponse({"error":"no_bullets_found"}, status_code=422)
 
-    # Build full resume text (before)
+    # BEFORE scores
     resume_before = "\n".join(bullets)
-
-    # Scores before
     try:
         score_before = composite_score(resume_before, job_description)
     except Exception as e:
@@ -476,28 +591,24 @@ async def rewrite_json(
     if len(rewritten) != len(paras):
         return JSONResponse({"error":"bullet_count_mismatch","in":len(paras),"out":len(rewritten)}, status_code=500)
 
-    # Enforce caps and set text
+    # Enforce caps and write into doc
     final_texts = []
     for idx, (p, orig, new_text) in enumerate(zip(paras, bullets, rewritten)):
         cap = tiered_char_cap(len(orig), max_chars_override)
         fitted = enforce_char_cap_with_reprompt(new_text, cap)
         set_paragraph_text_with_selective_links(p, fitted)
         final_texts.append(fitted)
-        lines_est_before = max(1, ceil(len(orig)/max(1,cpl_eff)))
-        lines_est_after = max(1, ceil(len(fitted)/max(1,cpl_eff)))
-        log.info(f"bullet[{idx}] orig_len={len(orig)} est_lines_before={lines_est_before} cap={cap} final_len={len(fitted)} est_lines_after={lines_est_after}")
+        log.info(f"bullet[{idx}] orig_len={len(orig)} cap={cap} final_len={len(fitted)}")
 
-    # Build full resume text (after)
+    # AFTER scores
     resume_after = "\n".join(final_texts)
-
-    # Scores after
     try:
         score_after = composite_score(resume_after, job_description)
     except Exception as e:
         log.exception("score_after_failed")
         score_after = {"embed_sim": 0.0, "keyword_cov": 0.0, "llm_score": 0.0, "composite": 0.0, "error": str(e)}
 
-    # Serialize DOCX to base64 for JSON
+    # Serialize DOCX
     enforce_single_page(doc)
     buf = BytesIO(); doc.save(buf); data = buf.getvalue()
     b64 = base64.b64encode(data).decode("ascii")
@@ -513,6 +624,9 @@ async def rewrite_json(
     except Exception:
         delta = {}
 
+    # Include distilled JD preview when enabled to aid debugging
+    distilled_preview = llm_distill_jd(job_description) if USE_DISTILLED_JD else None
+
     return JSONResponse({
         "file_b64": b64,
         "mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -522,12 +636,10 @@ async def rewrite_json(
             "after": score_after,
             "delta": delta
         },
-        "caps": {
-            "override": max_chars_override,
-            "cpl_for_logging": cpl_eff,
-            "tier_slack_for_logging": slack_eff,
-            "tiers": {"cap1": 100 if not max_chars_override else max_chars_override,
-                      "cap2": 200 if not max_chars_override else max_chars_override,
-                      "cap3": 300 if not max_chars_override else max_chars_override}
+        "meta": {
+            "use_llm_terms": USE_LLM_TERMS,
+            "use_distilled_jd": USE_DISTILLED_JD,
+            "semantic_distilled_weight": W_DISTILLED,
+            "distilled_jd": distilled_preview
         }
     })

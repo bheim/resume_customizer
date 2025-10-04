@@ -344,7 +344,7 @@ def composite_score(resume_text: str, jd_text: str) -> dict:
         "composite": round(score*100.0, 1),
     }
 
-# -------------------- Endpoint: rewrite --------------------
+# -------------------- Endpoint: rewrite (DOCX) --------------------
 @app.post("/rewrite")
 async def rewrite(
     file: UploadFile = File(...),
@@ -399,5 +399,119 @@ async def rewrite(
     return Response(
         content=data,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": 'attachment; filename=\"resume_edited.docx\"'}
+        headers={"Content-Disposition": 'attachment; filename="resume_edited.docx"'}
     )
+
+# -------------------- Endpoint: rewrite_json (JSON + base64 DOCX + scores) --------------------
+@app.post("/rewrite_json")
+async def rewrite_json(
+    file: UploadFile = File(...),
+    job_description: str = Form(...),
+    max_chars_override: Optional[int] = Form(None),
+    chars_per_line: Optional[int] = Form(None),   # optional UI hint for line estimates
+    tier_slack: Optional[int] = Form(None),       # optional UI hint for line estimates
+):
+    raw = await file.read()
+    size = len(raw)
+    ct = file.content_type
+    sha = hashlib.sha256(raw).hexdigest()
+
+    cpl_eff = int(chars_per_line) if chars_per_line else CPL_DEFAULT
+    slack_eff = int(tier_slack) if tier_slack is not None else TIER_SLACK_DEFAULT
+
+    log.info(f"/rewrite_json recv file='{file.filename}' size={size} sha256={sha} override={max_chars_override} cpl_eff={cpl_eff} tier_slack={slack_eff}")
+
+    if not raw or size < 512:
+        return JSONResponse({"error":"empty_or_small_file"}, status_code=400)
+    if ct not in {
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/octet-stream",
+        "application/msword",
+    }:
+        return JSONResponse({"error":"bad_content_type","got":ct}, status_code=415)
+
+    try:
+        doc = Document(BytesIO(raw))
+    except Exception as e:
+        log.exception("bad_docx")
+        return JSONResponse({"error":"bad_docx","detail":str(e)}, status_code=400)
+
+    bullets, paras = collect_word_numbered_bullets(doc)
+    if not bullets:
+        return JSONResponse({"error":"no_bullets_found"}, status_code=422)
+
+    # Build full resume text (before)
+    resume_before = "\n".join(bullets)
+
+    # Scores before
+    try:
+        score_before = composite_score(resume_before, job_description)
+    except Exception as e:
+        log.exception("score_before_failed")
+        score_before = {"embed_sim": 0.0, "keyword_cov": 0.0, "llm_score": 0.0, "composite": 0.0, "error": str(e)}
+
+    # Rewrite
+    try:
+        rewritten = rewrite_with_openai(bullets, job_description)
+    except Exception as e:
+        log.exception("openai_failed")
+        return JSONResponse({"error":"openai_failed","detail":str(e)}, status_code=502)
+
+    if len(rewritten) != len(paras):
+        return JSONResponse({"error":"bullet_count_mismatch","in":len(paras),"out":len(rewritten)}, status_code=500)
+
+    # Enforce caps and set text
+    final_texts = []
+    for idx, (p, orig, new_text) in enumerate(zip(paras, bullets, rewritten)):
+        cap = tiered_char_cap(len(orig), max_chars_override)
+        fitted = enforce_char_cap_with_reprompt(new_text, cap)
+        set_paragraph_text_with_selective_links(p, fitted)
+        final_texts.append(fitted)
+        lines_est_before = max(1, ceil(len(orig)/max(1,cpl_eff)))
+        lines_est_after = max(1, ceil(len(fitted)/max(1,cpl_eff)))
+        log.info(f"bullet[{idx}] orig_len={len(orig)} est_lines_before={lines_est_before} cap={cap} final_len={len(fitted)} est_lines_after={lines_est_after}")
+
+    # Build full resume text (after)
+    resume_after = "\n".join(final_texts)
+
+    # Scores after
+    try:
+        score_after = composite_score(resume_after, job_description)
+    except Exception as e:
+        log.exception("score_after_failed")
+        score_after = {"embed_sim": 0.0, "keyword_cov": 0.0, "llm_score": 0.0, "composite": 0.0, "error": str(e)}
+
+    # Serialize DOCX to base64 for JSON
+    enforce_single_page(doc)
+    buf = BytesIO(); doc.save(buf); data = buf.getvalue()
+    b64 = base64.b64encode(data).decode("ascii")
+
+    # Delta
+    try:
+        delta = {
+            "embed_sim": round(score_after["embed_sim"] - score_before["embed_sim"], 4),
+            "keyword_cov": round(score_after["keyword_cov"] - score_before["keyword_cov"], 4),
+            "llm_score": round(score_after["llm_score"] - score_before["llm_score"], 1),
+            "composite": round(score_after["composite"] - score_before["composite"], 1),
+        }
+    except Exception:
+        delta = {}
+
+    return JSONResponse({
+        "file_b64": b64,
+        "mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "filename": "resume_edited.docx",
+        "scores": {
+            "before": score_before,
+            "after": score_after,
+            "delta": delta
+        },
+        "caps": {
+            "override": max_chars_override,
+            "cpl_for_logging": cpl_eff,
+            "tier_slack_for_logging": slack_eff,
+            "tiers": {"cap1": 100 if not max_chars_override else max_chars_override,
+                      "cap2": 200 if not max_chars_override else max_chars_override,
+                      "cap3": 300 if not max_chars_override else max_chars_override}
+        }
+    })

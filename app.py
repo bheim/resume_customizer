@@ -21,7 +21,6 @@ def root():
 async def rewrite(file: UploadFile = File(...), job_description: str = Form(...), max_chars_override: Optional[int] = Form(None)):
     raw = await file.read()
     size = len(raw); ct = file.content_type; sha = hashlib.sha256(raw).hexdigest()
-    log.info(f"/rewrite recv filename='{file.filename}' size={size} sha256={sha} override={max_chars_override}")
     if not raw or size < 512: return JSONResponse({"error":"empty_or_small_file"}, status_code=400)
     if ct not in {"application/vnd.openxmlformats-officedocument.wordprocessingml.document","application/octet-stream","application/msword"}:
         return JSONResponse({"error":"bad_content_type","got":ct}, status_code=415)
@@ -49,12 +48,10 @@ async def rewrite(file: UploadFile = File(...), job_description: str = Form(...)
         fitted = enforce_char_cap_with_reprompt(new_text, cap)
         set_paragraph_text_with_selective_links(p, fitted)
         final_texts.append(fitted)
-        log.info(f"bullet[{idx}] orig_len={len(orig)} cap={cap} final_len={len(fitted)}")
 
     enforce_single_page(doc)
     from io import BytesIO
     buf = BytesIO(); doc.save(buf); data = buf.getvalue()
-    log.info(f"Returning DOCX bytes={len(data)} sha256={hashlib.sha256(data).hexdigest()}")
     return Response(content=data, media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                     headers={"Content-Disposition": 'attachment; filename="resume_edited.docx"'})
 

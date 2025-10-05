@@ -25,6 +25,7 @@ JOB DESCRIPTION:
     distilled = (r.choices[0].message.content or "").strip()
     if not distilled or len(distilled) < 40: distilled = jd_text
     _distill_cache[h] = distilled
+    log.info(f"The distilled job description is {distilled}")
     return distilled
 
 def llm_extract_terms(jd_text: str) -> Dict[str, List[str]]:
@@ -60,6 +61,9 @@ JOB DESCRIPTION:
     out = {k: sorted(set([t.strip() for t in data.get(k, []) if isinstance(t, str) and t.strip()])) for k in
            ["skills","tools","domains","responsibilities","seniority","certifications"]}
     _terms_cache[h] = out
+    log.info(f"The key terms for this job are {out}")
+
+
     return out
 
 def embed(text: str) -> List[float]:

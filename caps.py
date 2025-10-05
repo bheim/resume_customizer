@@ -1,5 +1,5 @@
 from typing import Optional
-from .config import REPROMPT_TRIES, CHAT_MODEL, client, log
+from config import REPROMPT_TRIES, CHAT_MODEL, client, log
 
 def tiered_char_cap(orig_len: int, override: Optional[int] = None) -> int:
     if override and override > 0: return override

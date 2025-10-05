@@ -6,7 +6,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.enum.section import WD_SECTION_START
-from .config import BULLET_CHARS
+from config import BULLET_CHARS
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 

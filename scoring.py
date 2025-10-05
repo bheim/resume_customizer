@@ -1,7 +1,7 @@
 from typing import Dict
-from .config import USE_DISTILLED_JD, W_DISTILLED, W_EMB, W_KEY, W_LLM
-from .llm_utils import embed, llm_fit_score, llm_distill_jd, llm_extract_terms
-from .text_utils import keyword_coverage, weighted_keyword_coverage
+from config import USE_DISTILLED_JD, W_DISTILLED, W_EMB, W_KEY, W_LLM
+from llm_utils import embed, llm_fit_score, llm_distill_jd, llm_extract_terms
+from text_utils import keyword_coverage, weighted_keyword_coverage
 
 def cosine(a, b):
     if not a or not b: return 0.0

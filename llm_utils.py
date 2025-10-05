@@ -1,8 +1,8 @@
 import re, hashlib
 from json import loads
 from typing import List, Dict
-from .config import client, CHAT_MODEL, EMBED_MODEL, USE_DISTILLED_JD, USE_LLM_TERMS, log
-from .text_utils import top_terms
+from config import client, CHAT_MODEL, EMBED_MODEL, USE_DISTILLED_JD, USE_LLM_TERMS, log
+from text_utils import top_terms
 
 _distill_cache: Dict[str, str] = {}
 _terms_cache: Dict[str, Dict[str, List[str]]] = {}

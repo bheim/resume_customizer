@@ -3,11 +3,11 @@ from typing import Optional
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
-from .config import log, health
-from .docx_utils import load_docx, collect_word_numbered_bullets, set_paragraph_text_with_selective_links, enforce_single_page
-from .llm_utils import rewrite_with_openai
-from .caps import tiered_char_cap, enforce_char_cap_with_reprompt
-from .scoring import composite_score
+from config import log, health
+from docx_utils import load_docx, collect_word_numbered_bullets, set_paragraph_text_with_selective_links, enforce_single_page
+from llm_utils import rewrite_with_openai
+from caps import tiered_char_cap, enforce_char_cap_with_reprompt
+from scoring import composite_score
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,

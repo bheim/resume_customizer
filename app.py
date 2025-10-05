@@ -323,6 +323,7 @@ Groups:
 - responsibilities: core duties (e.g., OKR planning, A/B testing)
 - seniority: indicators (e.g., lead, principal, staff, manager)
 - certifications: formal certs (e.g., PMP, AWS SA Pro)
+- AVOID boilerplate soft skills like "effective communicatoin"
 
 Output JSON ONLY with those keys and arrays. No prose.
 
@@ -458,7 +459,7 @@ def rewrite_with_openai(bullets: List[str], job_description: str) -> List[str]:
     prompt = f"""You are an expert resume editor.
 For each bullet:
 - Preserve facts and metrics. Do not invent.
-- Align to the role by adding 2–4 high-value terms from the list if they truthfully apply. Prefer exact phrases over synonyms when accurate.
+- Align to the role by adding 2–4 high-value terms from the list if they truthfully apply. Prefer exact phrases over synonyms when accurate. Do not add boilerplate soft skills.
 - Structure: outcome → metric → tool/domain term.
 - Keep concise and impactful. Avoid filler. Do not change tense/person.
 

@@ -105,14 +105,11 @@ def rewrite_with_openai(bullets: List[str], job_description: str) -> List[str]:
         terms_flat = [t for t in top_terms(jd_core, k=25) if not re.search(r"\b(communication|teamwork|collaboration)\b", t, re.I)]
     terms_line = ", ".join(terms_flat[:40]); n = len(bullets)
     prompt = (
-        f"You will rewrite {n} resume bullets.\n"
-        "- Preserve facts and metrics; do not invent.\n"
-        "- Prioritize concrete tools, domains, responsibilities, metrics.\n"
-        "- Do NOT add generic soft-skill phrases.\n"
+        f"You will rewrite {n} resume bullets based on the provided job description.\n"
         "- Outcome → metric → tool/domain. Concise. Same person/tense.\n"
         f"- Return STRICT JSON: an array of {n} strings. No prose. No code fences.\n\n"
         "ROLE CORE:\n" + jd_core + "\n\n"
-        "ROLE-CRITICAL TERMS (use only if they fit naturally and are true):\n" + terms_line + "\n\n"
+        "ROLE-CRITICAL TERMS:\n" + terms_line + "\n\n"
         "INPUT_BULLETS:\n" + "\n".join([f"{i+1}. {b}" for i, b in enumerate(bullets)]) + "\n\nReturn JSON ONLY like: [\"...\", \"...\"]"
     )
     r = client.chat.completions.create(model=CHAT_MODEL, messages=[{"role":"user","content":prompt}], temperature=0)

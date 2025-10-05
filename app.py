@@ -6,7 +6,6 @@ import base64
 from io import BytesIO
 from copy import deepcopy
 from typing import List, Tuple, Optional, Dict
-from math import ceil
 import re
 from collections import Counter
 from json import loads
@@ -41,7 +40,7 @@ CHAT_MODEL = os.getenv("CHAT_MODEL", "gpt-4o-mini")
 # -------------------- Feature toggles --------------------
 USE_LLM_TERMS = os.getenv("USE_LLM_TERMS", "1") == "1"
 USE_DISTILLED_JD = os.getenv("USE_DISTILLED_JD", "1") == "1"
-W_DISTILLED = float(os.getenv("W_DISTILLED", "0.7"))  # weight for distilled JD in semantic sim
+W_DISTILLED = float(os.getenv("W_DISTILLED", "0.7"))
 
 # -------------------- Caps and retries --------------------
 REPROMPT_TRIES = int(os.getenv("REPROMPT_TRIES", "3"))
@@ -61,7 +60,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -------------------- Health --------------------
 @app.get("/")
 def root():
     return {
@@ -174,22 +172,48 @@ def enforce_single_page(doc: Document):
     while len(_body_p())>1 and not doc.paragraphs[-1].text.strip():
         body.remove(doc.paragraphs[-1]._element)
 
-# -------------------- Bullet discovery --------------------
+# -------------------- Bullet discovery (hybrid, counts what user sees) --------------------
+BULLET_CHARS = {"•","·","-","–","—","◦","●","*"}
+
 def collect_word_numbered_bullets(doc: Document) -> Tuple[List[str], List]:
     bullets, paras = [], []
-    for p in doc.paragraphs:
+
+    def _is_numbered(p):
         pPr = p._p.pPr
-        if not (
+        return (
             (pPr is not None)
             and (getattr(pPr, "numPr", None) is not None)
             and (getattr(pPr.numPr, "numId", None) is not None)
             and (getattr(pPr.numPr.numId, "val", None) is not None)
-        ):
+        )
+
+    # body paragraphs
+    for p in doc.paragraphs:
+        t = (p.text or "").strip()
+        if not t:
             continue
-        text = p.text.strip()
-        if text:
-            bullets.append(text)
+        is_glyph = t and t[0] in BULLET_CHARS
+        if _is_numbered(p) or is_glyph:
+            if is_glyph:
+                t = t[1:].lstrip()
+            bullets.append(t)
             paras.append(p)
+
+    # table paragraphs
+    for tbl in doc.tables:
+        for row in tbl.rows:
+            for cell in row.cells:
+                for p in cell.paragraphs:
+                    t = (p.text or "").strip()
+                    if not t:
+                        continue
+                    is_glyph = t and t[0] in BULLET_CHARS
+                    if _is_numbered(p) or is_glyph:
+                        if is_glyph:
+                            t = t[1:].lstrip()
+                        bullets.append(t)
+                        paras.append(p)
+
     return bullets, paras
 
 # -------------------- Tiered caps --------------------
@@ -203,7 +227,7 @@ def tiered_char_cap(orig_len: int, override: Optional[int] = None) -> int:
     return 300
 
 def enforce_char_cap_with_reprompt(cur: str, cap: int) -> str:
-    text = (cur or "").strip().lstrip("-• ").strip()
+    text = (cur or "").replace("\n", " ").strip().lstrip("-• ").strip()
     if not client:
         return text[:cap].rstrip()
     if len(text) <= cap:
@@ -211,16 +235,16 @@ def enforce_char_cap_with_reprompt(cur: str, cap: int) -> str:
     for t in range(REPROMPT_TRIES):
         prompt = (
             f"Rewrite this resume bullet in {cap} characters or fewer. "
-            "Preserve numbers and the core result. Use one concise clause. No filler. "
-            "Return only the bullet text, no dash, no quotes.\n\n"
-            f"Bullet:\n{text}"
+            "Preserve numbers and the core result. One concise clause. No filler. "
+            "Return only the bullet text, no dash, no quotes."
+            f"\n\nBullet:\n{text}"
         )
         r = client.chat.completions.create(
             model=CHAT_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0
         )
-        nxt = r.choices[0].message.content.strip().lstrip("-• ").strip()
+        nxt = (r.choices[0].message.content or "").replace("\n", " ").strip().lstrip("-• ").strip()
         log.info(f"reprompt try={t+1} cap={cap} prev_len={len(text)} new_len={len(nxt)}")
         text = nxt
         if len(text) <= cap:
@@ -290,9 +314,9 @@ def llm_distill_jd(jd_text: str) -> str:
     h = jd_hash(jd_text)
     if h in _distill_cache:
         return _distill_cache[h]
-    prompt = f"""Distill the JOB DESCRIPTION into a focused role core (8–12 bullet-like lines), excluding all perks/benefits, compensation, culture, location, legal/EEO, and company boilerplate.
-Include only: core responsibilities, required skills and tools, domain focus, and seniority/scope signals.
-Return plain text only. No intro or outro.
+    prompt = f"""Distill the JOB DESCRIPTION into a focused role core (8–12 bullet-like lines), excluding perks/benefits, compensation, culture, location, legal/EEO, and boilerplate.
+Include only: core responsibilities, required skills/tools, domain focus, seniority/scope.
+Return plain text only. No intro/outro.
 
 JOB DESCRIPTION:
 {jd_text}
@@ -323,7 +347,7 @@ Groups:
 - responsibilities: core duties (e.g., OKR planning, A/B testing)
 - seniority: indicators (e.g., lead, principal, staff, manager)
 - certifications: formal certs (e.g., PMP, AWS SA Pro)
-- AVOID boilerplate soft skills like "effective communicatoin"
+Do NOT include generic soft skills like "effective communication", "team player", "self-starter".
 
 Output JSON ONLY with those keys and arrays. No prose.
 
@@ -343,7 +367,7 @@ JOB DESCRIPTION:
         cleaned = raw.strip()
         if cleaned.startswith("```"):
             cleaned = cleaned.strip("`")
-            cleaned = cleaned.replace("json", "", 1).strip()
+            cleaned = re.sub(r"^\s*json", "", cleaned, flags=re.I).strip()
         data = loads(cleaned)
     out = {k: sorted(set([t.strip() for t in data.get(k, []) if isinstance(t, str) and t.strip()])) for k in
            ["skills","tools","domains","responsibilities","seniority","certifications"]}
@@ -405,14 +429,12 @@ def composite_score(resume_text: str, jd_text: str) -> dict:
     else:
         distilled = None
 
-    # semantic similarity: mix distilled and original for stability
     emb_r = embed(resume_text)
     emb_j_dist = embed(jd_for_embed)
     sim_dist = cosine(emb_r, emb_j_dist)
     sim_orig = cosine(emb_r, embed(jd_text)) if USE_DISTILLED_JD else sim_dist
     semantic = W_DISTILLED * sim_dist + (1.0 - W_DISTILLED) * sim_orig
 
-    # keyword coverage
     if USE_LLM_TERMS:
         jd_for_terms = distilled if (USE_DISTILLED_JD and distilled) else jd_text
         terms = llm_extract_terms(jd_for_terms)
@@ -420,7 +442,6 @@ def composite_score(resume_text: str, jd_text: str) -> dict:
     else:
         key = keyword_coverage(resume_text, jd_text)
 
-    # llm rubric
     llm = llm_fit_score(resume_text, jd_for_terms) / 100.0
 
     score = W_EMB*semantic + W_KEY*key + W_LLM*llm
@@ -436,48 +457,81 @@ def composite_score(resume_text: str, jd_text: str) -> dict:
         out["llm_terms_used"] = True
     return out
 
-# -------------------- Rewrite prompt (JD-term targeted; uses distilled JD when enabled) --------------------
+# -------------------- Rewrite with strict 1:1 JSON array --------------------
 def rewrite_with_openai(bullets: List[str], job_description: str) -> List[str]:
     if not client:
         raise RuntimeError("OPENAI_API_KEY missing")
 
-    jd_for_terms = job_description
-    if USE_DISTILLED_JD:
-        distilled = llm_distill_jd(job_description)
-        jd_for_terms = distilled
+    jd_core = llm_distill_jd(job_description) if USE_DISTILLED_JD else job_description
 
+    # optional terms (filtered to avoid soft skills)
     if USE_LLM_TERMS:
-        jd_terms_struct = llm_extract_terms(jd_for_terms)
+        jd_terms_struct = llm_extract_terms(jd_core)
+        SOFT = re.compile(r"\b(communication|teamwork|collaboration|interpersonal|self[- ]starter|detail[- ]oriented)\b", re.I)
         terms_flat = []
-        for cat in ["tools","skills","responsibilities","domains","certifications","seniority"]:
-            terms_flat.extend(jd_terms_struct.get(cat, []))
+        for cat in ["tools","responsibilities","domains","certifications","seniority","skills"]:
+            for t in jd_terms_struct.get(cat, []):
+                if SOFT.search(t):
+                    continue
+                terms_flat.append(t)
     else:
-        terms_flat = top_terms(jd_for_terms, k=25)
+        terms_flat = [t for t in top_terms(jd_core, k=25) if not re.search(r"\b(communication|teamwork|collaboration)\b", t, re.I)]
 
     terms_line = ", ".join(terms_flat[:40])
+    n = len(bullets)
 
-    prompt = f"""You are an expert resume editor.
-For each bullet:
-- Preserve facts and metrics. Do not invent.
-- Align to the role by adding 2–4 high-value terms from the list if they truthfully apply. Prefer exact phrases over synonyms when accurate. Do not add boilerplate soft skills.
-- Structure: outcome → metric → tool/domain term.
-- Keep concise and impactful. Avoid filler. Do not change tense/person.
+    prompt = (
+        f"You will rewrite {n} resume bullets.\n"
+        "Rules:\n"
+        "- Preserve facts and metrics; do not invent.\n"
+        "- Prioritize concrete tools, domains, responsibilities, and metrics.\n"
+        "- Do NOT add generic soft-skill phrases (e.g., 'effective communication', 'team player', 'self-starter').\n"
+        "- Outcome → metric → tool/domain. Concise. Same person/tense.\n"
+        f"- Return STRICT JSON: an array of {n} strings. No prose. No code fences.\n\n"
+        "ROLE CORE (from the job description):\n"
+        f"{jd_core}\n\n"
+        "ROLE-CRITICAL TERMS (use only if they fit naturally and are true):\n"
+        f"{terms_line}\n\n"
+        "INPUT_BULLETS:\n" +
+        "\n".join([f"{i+1}. {b}" for i, b in enumerate(bullets)]) +
+        "\n\nReturn JSON ONLY like: [\"...\", \"...\"]"
+    )
 
-Role-critical terms to consider (use only if accurate):
-{terms_line}
-
-Original bullets:
-{chr(10).join(f"- {b}" for b in bullets)}
-
-Return only the rewritten bullets, one per line, same order, no numbering, no extra text."""
-    log.info(f"OpenAI request: bullets={len(bullets)} jd_terms={len(terms_flat)} distilled_used={USE_DISTILLED_JD} llm_terms_used={USE_LLM_TERMS}")
     r = client.chat.completions.create(
         model=CHAT_MODEL,
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.3
+        temperature=0
     )
-    text = r.choices[0].message.content.strip()
-    lines = [line.strip("- ").strip() for line in text.splitlines() if line.strip()]
+    raw = (r.choices[0].message.content or "").strip()
+
+    def _parse_json_list(s: str) -> List[str]:
+        s2 = s.strip()
+        if s2.startswith("```"):
+            s2 = s2.strip("`")
+            s2 = re.sub(r"^\s*json", "", s2, flags=re.I).strip()
+        lst = loads(s2)
+        if not isinstance(lst, list):
+            raise ValueError("not a list")
+        out = []
+        for x in lst:
+            t = str(x).replace("\n", " ").strip().lstrip("-• ").strip()
+            out.append(t)
+        return out
+
+    try:
+        lines = _parse_json_list(raw)
+    except Exception:
+        r2 = client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[{"role":"user","content":f"Your prior output was not valid JSON. Return ONLY a JSON array of {n} strings. No commentary. No code fences."}],
+            temperature=0
+        )
+        lines = _parse_json_list((r2.choices[0].message.content or "").strip())
+
+    if len(lines) != n:
+        log.warning(f"LLM count mismatch: got={len(lines)} expected={n}. Applying pad/trim fallback.")
+        lines = (lines + bullets[len(lines):])[:n]
+
     log.info(f"OpenAI response lines: {len(lines)}")
     return lines
 
@@ -513,11 +567,15 @@ async def rewrite(
     if not bullets:
         return JSONResponse({"error":"no_bullets_found"}, status_code=422)
 
+    log.info(f"bullets_in={len(bullets)} sample_in={[b[:60] for b in bullets[:3]]}")
+
     try:
         rewritten = rewrite_with_openai(bullets, job_description)
     except Exception as e:
         log.exception("openai_failed")
         return JSONResponse({"error":"openai_failed","detail":str(e)}, status_code=502)
+
+    log.info(f"bullets_out={len(rewritten)} sample_out={[r[:60] for r in rewritten[:3]]} distilled={USE_DISTILLED_JD} llm_terms={USE_LLM_TERMS}")
 
     if len(rewritten) != len(paras):
         return JSONResponse({"error":"bullet_count_mismatch","in":len(paras),"out":len(rewritten)}, status_code=500)
@@ -536,7 +594,7 @@ async def rewrite(
     return Response(
         content=data,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": 'attachment; filename="resume_edited.docx"'}
+        headers={"Content-Disposition": 'attachment; filename=\"resume_edited.docx\"'}
     )
 
 # -------------------- Endpoint: rewrite_json (JSON + base64 DOCX + scores) --------------------
@@ -574,7 +632,6 @@ async def rewrite_json(
     if not bullets:
         return JSONResponse({"error":"no_bullets_found"}, status_code=422)
 
-    # BEFORE scores
     resume_before = "\n".join(bullets)
     try:
         score_before = composite_score(resume_before, job_description)
@@ -582,7 +639,6 @@ async def rewrite_json(
         log.exception("score_before_failed")
         score_before = {"embed_sim": 0.0, "keyword_cov": 0.0, "llm_score": 0.0, "composite": 0.0, "error": str(e)}
 
-    # Rewrite
     try:
         rewritten = rewrite_with_openai(bullets, job_description)
     except Exception as e:
@@ -592,7 +648,6 @@ async def rewrite_json(
     if len(rewritten) != len(paras):
         return JSONResponse({"error":"bullet_count_mismatch","in":len(paras),"out":len(rewritten)}, status_code=500)
 
-    # Enforce caps and write into doc
     final_texts = []
     for idx, (p, orig, new_text) in enumerate(zip(paras, bullets, rewritten)):
         cap = tiered_char_cap(len(orig), max_chars_override)
@@ -601,7 +656,6 @@ async def rewrite_json(
         final_texts.append(fitted)
         log.info(f"bullet[{idx}] orig_len={len(orig)} cap={cap} final_len={len(fitted)}")
 
-    # AFTER scores
     resume_after = "\n".join(final_texts)
     try:
         score_after = composite_score(resume_after, job_description)
@@ -609,12 +663,10 @@ async def rewrite_json(
         log.exception("score_after_failed")
         score_after = {"embed_sim": 0.0, "keyword_cov": 0.0, "llm_score": 0.0, "composite": 0.0, "error": str(e)}
 
-    # Serialize DOCX
     enforce_single_page(doc)
     buf = BytesIO(); doc.save(buf); data = buf.getvalue()
     b64 = base64.b64encode(data).decode("ascii")
 
-    # Delta
     try:
         delta = {
             "embed_sim": round(score_after["embed_sim"] - score_before["embed_sim"], 4),
@@ -625,7 +677,6 @@ async def rewrite_json(
     except Exception:
         delta = {}
 
-    # Include distilled JD preview when enabled to aid debugging
     distilled_preview = llm_distill_jd(job_description) if USE_DISTILLED_JD else None
 
     return JSONResponse({

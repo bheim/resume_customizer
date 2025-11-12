@@ -1,5 +1,6 @@
 import os, sys, logging
 from openai import OpenAI
+from supabase import create_client, Client
 
 # --- Logging ---
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -17,6 +18,20 @@ OPENAI_KEY = os.environ.get("OPENAI_API_KEY")
 client = OpenAI(api_key=OPENAI_KEY) if OPENAI_KEY else None
 EMBED_MODEL = os.getenv("EMBED_MODEL", "text-embedding-3-small")
 CHAT_MODEL = os.getenv("CHAT_MODEL", "gpt-4o-mini")
+
+# --- Supabase ---
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+supabase: Client | None = None
+if SUPABASE_URL and SUPABASE_KEY:
+    try:
+        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+        log.info("Supabase client initialized successfully")
+    except Exception as e:
+        log.warning(f"Failed to initialize Supabase client: {e}")
+        supabase = None
+else:
+    log.warning("Supabase credentials not found. Q&A features will be disabled.")
 
 # --- Feature toggles ---
 USE_LLM_TERMS = os.getenv("USE_LLM_TERMS", "1") == "1"
@@ -38,6 +53,7 @@ def health():
     return {
         "status": "ok",
         "openai": bool(OPENAI_KEY),
+        "supabase": bool(supabase),
         "models": {"embed": EMBED_MODEL, "chat": CHAT_MODEL},
         "weights": {"emb": W_EMB, "keywords": W_KEY, "llm": W_LLM, "semantic_distilled_weight": W_DISTILLED},
         "features": {"use_llm_terms": USE_LLM_TERMS, "use_distilled_jd": USE_DISTILLED_JD},

@@ -290,6 +290,7 @@ def rewrite_with_context(bullets: List[str], job_description: str,
                         qa_context: List[Dict[str, str]]) -> List[str]:
     """
     Rewrite resume bullets using both job description and Q&A context.
+    Uses Google XYZ format and custom prompting strategy.
 
     Args:
         bullets: Original resume bullets
@@ -302,45 +303,48 @@ def rewrite_with_context(bullets: List[str], job_description: str,
     if not client:
         raise RuntimeError("OPENAI_API_KEY missing")
 
-    # Build context string from Q&A
-    context_str = ""
+    # Build Contextual Q&A section
+    qa_section = ""
     if qa_context:
-        context_str = "\n\nADDITIONAL CONTEXT FROM USER:\n"
+        qa_section = "\n⸻\nContextual Q&A (verbatim):\n"
         for qa in qa_context:
-            context_str += f"Q: {qa['question']}\nA: {qa['answer']}\n"
+            qa_section += f"Q: {qa['question']}\nA: {qa['answer']}\n\n"
+        qa_section += "⸻\n"
 
-    jd_core = llm_distill_jd(job_description) if USE_DISTILLED_JD else job_description
+    # Build current bullets section
+    bullets_section = "Current Bullets:\n" + "\n".join([f"• {b}" for b in bullets])
 
-    if USE_LLM_TERMS:
-        jd_terms_struct = llm_extract_terms(jd_core)
-        SOFT = re.compile(r"\b(communication|teamwork|collaboration|interpersonal|self[- ]starter|detail[- ]oriented)\b", re.I)
-        terms_flat = []
-        for cat in ["tools", "responsibilities", "domains", "certifications", "seniority", "skills"]:
-            for t in jd_terms_struct.get(cat, []):
-                if SOFT.search(t):
-                    continue
-                terms_flat.append(t)
-    else:
-        terms_flat = [t for t in top_terms(jd_core, k=25)
-                     if not re.search(r"\b(communication|teamwork|collaboration)\b", t, re.I)]
-
-    terms_line = ", ".join(terms_flat[:40])
     n = len(bullets)
 
-    prompt = (
-        f"You will rewrite {n} resume bullets for a specific job, using the job description AND additional context from the candidate.\n\n"
-        "GUIDELINES:\n"
-        "- Follow this structure: Outcome → metric → tool/domain\n"
-        "- Be concise and use consistent person/tense\n"
-        "- Incorporate specific metrics, technologies, and impact from the additional context\n"
-        "- Align with the role-critical terms from the job description\n"
-        f"- Return STRICT JSON: an array of exactly {n} strings. No prose. No code fences.\n\n"
-        "ROLE CORE:\n" + jd_core + "\n\n"
-        "ROLE-CRITICAL TERMS:\n" + terms_line + "\n"
-        + context_str + "\n\n"
-        "INPUT_BULLETS:\n" + "\n".join([f"{i+1}. {b}" for i, b in enumerate(bullets)]) +
-        f"\n\nReturn JSON ONLY like: [\"...\", \"...\"] with exactly {n} bullets."
-    )
+    prompt = f"""You are continuing as the same expert resume coach.
+You already have the user's context from earlier answers (quantitative results, methods, frameworks, outcomes, team size, tools used, etc.).
+Use the section titled "Contextual Q&A (verbatim)" as authoritative facts; do not ask new questions.
+
+Goal: Customize the same bullets for a new job description.
+• Use all provided context automatically (both base bullets and Q&A).
+• Do not ask follow-up questions; produce final bullets immediately.
+
+Standing Principles for All Roles
+• Preserve ownership and initiative language even if the JD uses low-agency verbs (e.g., "support," "assist," "collaborate").
+• Translate competencies, do not mirror phrasing.
+• Prioritize impact, metrics, and decision-making authority over surface similarity to JD wording.
+• Always output in the Google XYZ structure: Accomplished [X] as measured by [Y] by doing [Z].
+• If teamwork is emphasized, frame as leadership within collaboration (e.g., "led cross-functional…").
+
+Rewriting Guidelines:
+• Use the Google XYZ formula: Accomplished [X] as measured by [Y] by doing [Z].
+• Keep bullets concise (≤ 25 words ideally).
+• Maintain strong action verbs and alignment with the new JD's competencies.
+• Return bullets as a simple numbered list, no commentary.
+• Return STRICT JSON: an array of exactly {n} strings. No prose. No code fences.
+
+⸻
+New Job Description:
+{job_description}
+{qa_section}
+{bullets_section}
+⸻
+Return ONLY a JSON array of {n} rewritten bullets like: ["...", "..."]"""
 
     r = client.chat.completions.create(
         model=CHAT_MODEL,

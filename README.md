@@ -193,8 +193,16 @@ resume_customizer/
 4. User answers questions in frontend
 5. Backend determines if more questions needed
 6. If yes, generate more questions; if no, mark ready
-7. Backend uses all Q&A context to generate better bullets
+7. Backend uses all Q&A context with Google XYZ format to generate better bullets
 8. Store answers in user_context for future sessions
+
+### Custom Prompting Strategy
+The system uses a specialized resume coaching approach:
+- **Google XYZ Format**: Accomplished [X] as measured by [Y] by doing [Z]
+- **Ownership Language**: Preserves initiative even when JD uses passive verbs
+- **Competency Translation**: Prioritizes impact over keyword matching
+- **Contextual Q&A**: Uses stored answers as authoritative facts
+- **Leadership Framing**: Frames teamwork as leadership within collaboration
 
 ### Question Types
 

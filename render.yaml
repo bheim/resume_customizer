@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: resume-customizer
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        value: https://grfdmtjytugaoychtxpr.supabase.co
+      - key: SUPABASE_KEY
+        sync: false
+      - key: LOG_LEVEL
+        value: INFO
+      - key: EMBED_MODEL
+        value: text-embedding-3-small
+      - key: CHAT_MODEL
+        value: gpt-4o-mini
+      - key: USE_LLM_TERMS
+        value: "1"
+      - key: USE_DISTILLED_JD
+        value: "1"
+      - key: PYTHON_VERSION
+        value: 3.11.9

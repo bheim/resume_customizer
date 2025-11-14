@@ -1,6 +1,6 @@
 import re, hashlib
 from json import loads
-from typing import List, Dict
+from typing import List, Dict, Optional, Tuple
 from config import client, CHAT_MODEL, EMBED_MODEL, USE_DISTILLED_JD, USE_LLM_TERMS, log
 from text_utils import top_terms
 
@@ -135,4 +135,248 @@ def rewrite_with_openai(bullets: List[str], job_description: str) -> List[str]:
         log.warning(f"LLM count mismatch: got={len(lines)} expected={n}. Applying pad/trim fallback.")
         lines = (lines + bullets[len(lines):])[:n]
     log.info(f"OpenAI response lines: {len(lines)}")
+    return lines
+
+
+def generate_followup_questions(bullets: List[str], job_description: str,
+                                existing_context: Optional[List[Dict[str, str]]] = None,
+                                max_questions: int = 3) -> List[Dict[str, str]]:
+    """
+    Generate follow-up questions to gather more context about the user's experience.
+
+    Args:
+        bullets: List of resume bullet points
+        job_description: The target job description
+        existing_context: Previously answered Q&A pairs to avoid repeating
+        max_questions: Maximum number of questions to generate
+
+    Returns:
+        List of dicts with 'question' and 'type' keys
+    """
+    if not client:
+        raise RuntimeError("OPENAI_API_KEY missing")
+
+    # Build context string from existing Q&A
+    context_str = ""
+    if existing_context:
+        context_str = "\n\nPREVIOUSLY ANSWERED QUESTIONS:\n"
+        for qa in existing_context:
+            context_str += f"Q: {qa['question']}\nA: {qa['answer']}\n\n"
+
+    bullets_text = "\n".join([f"{i+1}. {b}" for i, b in enumerate(bullets)])
+
+    prompt = f"""You are a career counselor helping someone tailor their resume. Based on their current resume bullets and the target job description, generate {max_questions} specific follow-up questions that will help you write stronger, more tailored bullet points.
+
+Focus on:
+1. Quantifiable metrics and achievements they may have omitted
+2. Specific technologies, tools, or methodologies relevant to the target role
+3. Impact and outcomes of their work
+4. Team size, scope, or scale of their responsibilities
+5. Specific challenges they overcame
+
+TARGET JOB DESCRIPTION:
+{job_description}
+
+CURRENT RESUME BULLETS:
+{bullets_text}
+{context_str}
+Generate {max_questions} questions that will help improve these bullets. Return ONLY valid JSON in this format:
+[
+  {{"question": "...", "type": "metrics"}},
+  {{"question": "...", "type": "technical"}},
+  {{"question": "...", "type": "impact"}}
+]
+
+Valid types: metrics, technical, impact, scope, challenges, achievements"""
+
+    r = client.chat.completions.create(
+        model=CHAT_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.7
+    )
+
+    raw = (r.choices[0].message.content or "").strip()
+
+    # Parse JSON response
+    try:
+        questions = _parse_json_questions(raw)
+    except Exception as e:
+        log.exception(f"Failed to parse questions JSON: {e}")
+        # Fallback questions
+        questions = [
+            {"question": "What quantifiable metrics or results did you achieve in these roles?", "type": "metrics"},
+            {"question": "What specific technologies or tools relevant to this job did you use?", "type": "technical"},
+            {"question": "What was the business impact of your work?", "type": "impact"}
+        ]
+
+    return questions[:max_questions]
+
+
+def _parse_json_questions(s: str) -> List[Dict[str, str]]:
+    """Parse JSON questions response from LLM."""
+    s2 = s.strip()
+    if s2.startswith("```"):
+        s2 = s2.strip("`")
+        s2 = re.sub(r"^\s*json", "", s2, flags=re.I).strip()
+
+    data = loads(s2)
+    if not isinstance(data, list):
+        raise ValueError("Expected a list of questions")
+
+    return [{"question": q.get("question", ""), "type": q.get("type", "general")}
+            for q in data if isinstance(q, dict) and "question" in q]
+
+
+def should_ask_more_questions(answered_qa: List[Dict[str, str]], bullets: List[str],
+                              job_description: str) -> Tuple[bool, str]:
+    """
+    Determine if more follow-up questions are needed based on existing answers.
+
+    Args:
+        answered_qa: List of answered Q&A pairs
+        bullets: Original resume bullets
+        job_description: Target job description
+
+    Returns:
+        Tuple of (should_ask_more, reason)
+    """
+    if not client:
+        return False, "OpenAI client not available"
+
+    if len(answered_qa) >= 10:
+        return False, "Maximum questions reached"
+
+    if len(answered_qa) == 0:
+        return True, "No questions answered yet"
+
+    # Ask LLM if we have enough context
+    qa_text = "\n".join([f"Q: {qa['question']}\nA: {qa['answer']}" for qa in answered_qa])
+    bullets_text = "\n".join([f"{i+1}. {b}" for i, b in enumerate(bullets)])
+
+    prompt = f"""You are evaluating if there is enough context to write strong, tailored resume bullets.
+
+ORIGINAL BULLETS:
+{bullets_text}
+
+TARGET JOB:
+{job_description}
+
+INFORMATION GATHERED:
+{qa_text}
+
+Based on this information, do you have enough context to write compelling, tailored resume bullets with metrics, impact, and relevant technical details?
+
+Answer with ONLY "YES" or "NO" followed by a brief reason (one sentence).
+Format: YES|reason or NO|reason"""
+
+    r = client.chat.completions.create(
+        model=CHAT_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0
+    )
+
+    response = (r.choices[0].message.content or "").strip()
+
+    # Parse response
+    if response.startswith("YES"):
+        reason = response.split("|", 1)[1] if "|" in response else "Sufficient context"
+        return False, reason
+    else:
+        reason = response.split("|", 1)[1] if "|" in response else "Need more context"
+        return True, reason
+
+
+def rewrite_with_context(bullets: List[str], job_description: str,
+                        qa_context: List[Dict[str, str]]) -> List[str]:
+    """
+    Rewrite resume bullets using both job description and Q&A context.
+    Uses Google XYZ format and custom prompting strategy.
+
+    Args:
+        bullets: Original resume bullets
+        job_description: Target job description
+        qa_context: List of Q&A pairs with additional context
+
+    Returns:
+        List of rewritten bullets
+    """
+    if not client:
+        raise RuntimeError("OPENAI_API_KEY missing")
+
+    # Build Contextual Q&A section
+    qa_section = ""
+    if qa_context:
+        qa_section = "\n⸻\nContextual Q&A (verbatim):\n"
+        for qa in qa_context:
+            qa_section += f"Q: {qa['question']}\nA: {qa['answer']}\n\n"
+        qa_section += "⸻\n"
+
+    # Build current bullets section
+    bullets_section = "Current Bullets:\n" + "\n".join([f"• {b}" for b in bullets])
+
+    n = len(bullets)
+
+    prompt = f"""You are continuing as the same expert resume coach.
+You already have the user's context from earlier answers (quantitative results, methods, frameworks, outcomes, team size, tools used, etc.).
+Use the section titled "Contextual Q&A (verbatim)" as authoritative facts; do not ask new questions.
+
+Goal: Customize the same bullets for a new job description.
+• Use all provided context automatically (both base bullets and Q&A).
+• Do not ask follow-up questions; produce final bullets immediately.
+
+Standing Principles for All Roles
+• Preserve ownership and initiative language even if the JD uses low-agency verbs (e.g., "support," "assist," "collaborate").
+• Translate competencies, do not mirror phrasing.
+• Prioritize impact, metrics, and decision-making authority over surface similarity to JD wording.
+• Always output in the Google XYZ structure: Accomplished [X] as measured by [Y] by doing [Z].
+• If teamwork is emphasized, frame as leadership within collaboration (e.g., "led cross-functional…").
+
+Rewriting Guidelines:
+• Use the Google XYZ formula: Accomplished [X] as measured by [Y] by doing [Z].
+• Keep bullets concise (≤ 25 words ideally).
+• Maintain strong action verbs and alignment with the new JD's competencies.
+• Return bullets as a simple numbered list, no commentary.
+• Return STRICT JSON: an array of exactly {n} strings. No prose. No code fences.
+
+⸻
+New Job Description:
+{job_description}
+{qa_section}
+{bullets_section}
+⸻
+Return ONLY a JSON array of {n} rewritten bullets like: ["...", "..."]"""
+
+    r = client.chat.completions.create(
+        model=CHAT_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0
+    )
+
+    raw = (r.choices[0].message.content or "").strip()
+
+    def _parse_json_list(s: str) -> List[str]:
+        s2 = s.strip()
+        if s2.startswith("```"):
+            s2 = s2.strip("`")
+            s2 = re.sub(r"^\s*json", "", s2, flags=re.I).strip()
+        lst = loads(s2)
+        if not isinstance(lst, list):
+            raise ValueError("not a list")
+        return [str(x).replace("\n", " ").strip().lstrip("-• ").strip() for x in lst]
+
+    try:
+        lines = _parse_json_list(raw)
+    except Exception:
+        r2 = client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[{"role": "user", "content": f"Your prior output was not valid JSON. Return ONLY a JSON array of {n} strings. No commentary. No code fences."}],
+            temperature=0
+        )
+        lines = _parse_json_list((r2.choices[0].message.content or "").strip())
+
+    if len(lines) != n:
+        log.warning(f"LLM count mismatch: got={len(lines)} expected={n}. Applying pad/trim fallback.")
+        lines = (lines + bullets[len(lines):])[:n]
+
+    log.info(f"OpenAI response lines with context: {len(lines)}")
     return lines

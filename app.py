@@ -264,6 +264,8 @@ async def submit_answers(submission: AnswerSubmission = Body(...)):
 
     # If more questions needed, generate them
     new_questions = []
+    # HARDCODING TO CIRCUMVENT NEW QUESTIONS
+    need_more = False
     if need_more:
         try:
             questions = generate_followup_questions(bullets, job_description, answered_qa, max_questions=2)

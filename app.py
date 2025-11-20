@@ -192,13 +192,17 @@ async def generate_questions(file: UploadFile = File(...), job_description: str 
     for q in questions:
         qa_id = store_qa_pair(session_id, q["question"], question_type=q["type"])
         if qa_id:
+            log.info(f"Created qa_pair with ID: {qa_id} for question: {q['question'][:50]}...")
             qa_pairs.append({
                 "qa_id": qa_id,
                 "question": q["question"],
                 "type": q["type"]
             })
+        else:
+            log.error(f"Failed to store qa_pair for question: {q['question'][:50]}...")
 
     log.info(f"Generated {len(qa_pairs)} questions for session {session_id}")
+    log.info(f"Returning qa_ids to frontend: {[qp['qa_id'] for qp in qa_pairs]}")
 
     return JSONResponse({
         "session_id": session_id,
@@ -219,6 +223,9 @@ async def submit_answers(submission: AnswerSubmission = Body(...)):
     session_id = submission.session_id
     answers = submission.answers
     user_id = submission.user_id
+
+    log.info(f"Received answers for session {session_id}")
+    log.info(f"qa_ids received from frontend: {[ans.get('qa_id') for ans in answers]}")
 
     # Validate session exists
     session = get_qa_session(session_id)

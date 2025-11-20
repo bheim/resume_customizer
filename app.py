@@ -369,3 +369,12 @@ async def rewrite_with_qa(session_id: str = Form(...), max_chars_override: Optio
         "scores": {"before": score_before, "after": score_after, "delta": delta},
         "qa_context_used": len(qa_context)
     })
+
+
+@app.post("/generate_results")
+async def generate_results(session_id: str = Form(...), max_chars_override: Optional[int] = Form(None)):
+    """
+    Alias for /rewrite_with_qa endpoint.
+    Generate final resume results using Q&A context from the session.
+    """
+    return await rewrite_with_qa(session_id, max_chars_override)

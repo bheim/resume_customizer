@@ -126,9 +126,16 @@ def update_qa_answer(qa_id: str, answer: str) -> bool:
         True if successful, False otherwise
     """
     if not supabase:
+        log.warning("Supabase not configured, cannot update answer")
         return False
 
     try:
+        # First check if the qa_pair exists
+        check_result = supabase.table("qa_pairs").select("id").eq("id", qa_id).execute()
+        if not check_result.data or len(check_result.data) == 0:
+            log.error(f"QA pair {qa_id} does not exist in database")
+            return False
+
         data = {
             "answer": answer,
             "answered_at": datetime.utcnow().isoformat()
@@ -136,10 +143,15 @@ def update_qa_answer(qa_id: str, answer: str) -> bool:
 
         result = supabase.table("qa_pairs").update(data).eq("id", qa_id).execute()
 
-        return bool(result.data)
+        if result.data and len(result.data) > 0:
+            log.info(f"Successfully updated answer for qa_id={qa_id}")
+            return True
+        else:
+            log.error(f"Update returned no data for qa_id={qa_id}. RLS may be blocking the update.")
+            return False
 
     except Exception as e:
-        log.exception(f"Error updating Q&A answer: {e}")
+        log.exception(f"Error updating Q&A answer for qa_id={qa_id}: {e}")
         return False
 
 

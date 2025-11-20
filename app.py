@@ -378,10 +378,78 @@ async def rewrite_with_qa(session_id: str = Form(...), max_chars_override: Optio
     })
 
 
+class GenerateResultsRequest(BaseModel):
+    session_id: str
+    max_chars_override: Optional[int] = None
+
+
 @app.post("/generate_results")
-async def generate_results(session_id: str = Form(...), max_chars_override: Optional[int] = Form(None)):
+async def generate_results(request: GenerateResultsRequest = Body(...)):
     """
-    Alias for /rewrite_with_qa endpoint.
     Generate final resume results using Q&A context from the session.
+    Accepts JSON body (unlike /rewrite_with_qa which uses Form data).
     """
-    return await rewrite_with_qa(session_id, max_chars_override)
+    log.info(f"Received generate_results request for session: {request.session_id}")
+
+    if not supabase:
+        return JSONResponse({"error": "supabase_not_configured"}, status_code=503)
+
+    # Validate session exists
+    session = get_qa_session(request.session_id)
+    if not session:
+        return JSONResponse({"error": "session_not_found"}, status_code=404)
+
+    bullets = session["bullets"]
+    job_description = session["job_description"]
+
+    # Get answered Q&A pairs for context
+    qa_context = get_answered_qa_pairs(request.session_id)
+
+    if not qa_context:
+        log.warning(f"No Q&A context found for session {request.session_id}, falling back to basic rewrite")
+        try:
+            rewritten = rewrite_with_openai(bullets, job_description)
+        except Exception as e:
+            log.exception("openai_failed")
+            return JSONResponse({"error": "openai_failed", "detail": str(e)}, status_code=502)
+    else:
+        log.info(f"Using {len(qa_context)} Q&A pairs for context in rewrite")
+        try:
+            rewritten = rewrite_with_context(bullets, job_description, qa_context)
+        except Exception as e:
+            log.exception("openai_failed_with_context")
+            return JSONResponse({"error": "openai_failed", "detail": str(e)}, status_code=502)
+
+    resume_before = "\n".join(bullets)
+    try:
+        score_before = composite_score(resume_before, job_description)
+    except Exception as e:
+        score_before = {"embed_sim": 0.0, "keyword_cov": 0.0, "llm_score": 0.0, "composite": 0.0, "error": str(e)}
+
+    resume_after = "\n".join(rewritten)
+    try:
+        score_after = composite_score(resume_after, job_description)
+    except Exception as e:
+        score_after = {"embed_sim": 0.0, "keyword_cov": 0.0, "llm_score": 0.0, "composite": 0.0, "error": str(e)}
+
+    delta = {}
+    try:
+        delta = {
+            "embed_sim": round(score_after["embed_sim"] - score_before["embed_sim"], 4),
+            "keyword_cov": round(score_after["keyword_cov"] - score_before["keyword_cov"], 4),
+            "llm_score": round(score_after["llm_score"] - score_before["llm_score"], 1),
+            "composite": round(score_after["composite"] - score_before["composite"], 1),
+        }
+    except Exception:
+        pass
+
+    # Mark session as completed
+    update_session_status(request.session_id, "completed")
+
+    return JSONResponse({
+        "session_id": request.session_id,
+        "original_bullets": bullets,
+        "rewritten_bullets": rewritten,
+        "scores": {"before": score_before, "after": score_after, "delta": delta},
+        "qa_context_used": len(qa_context)
+    })

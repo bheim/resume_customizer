@@ -140,18 +140,19 @@ def rewrite_with_openai(bullets: List[str], job_description: str) -> List[str]:
 
 def generate_followup_questions(bullets: List[str], job_description: str,
                                 existing_context: Optional[List[Dict[str, str]]] = None,
-                                max_questions: int = 3) -> List[Dict[str, str]]:
+                                max_questions: int = 10) -> List[Dict[str, str]]:
     """
     Generate follow-up questions to gather more context about the user's experience.
+    Each question is associated with a specific bullet point.
 
     Args:
         bullets: List of resume bullet points
         job_description: The target job description
         existing_context: Previously answered Q&A pairs to avoid repeating
-        max_questions: Maximum number of questions to generate
+        max_questions: Maximum number of questions to generate (default 10, but LLM decides actual count)
 
     Returns:
-        List of dicts with 'question' and 'type' keys
+        List of dicts with 'question', 'type', 'bullet_index', and 'bullet_text' keys
     """
     if not client:
         raise RuntimeError("OPENAI_API_KEY missing")
@@ -166,7 +167,9 @@ def generate_followup_questions(bullets: List[str], job_description: str,
 
     bullets_text = "\n".join([f"{i+1}. {b}" for i, b in enumerate(bullets)])
 
-    prompt = f"""You are a career counselor helping someone tailor their resume. Based on their current resume bullets and the target job description, generate {max_questions} specific follow-up questions that will help you write stronger, more tailored bullet points.
+    prompt = f"""You are a career counselor helping someone tailor their resume. For each resume bullet below, determine if you need to ask follow-up questions to write stronger bullets.
+
+IMPORTANT: Be conservative - only ask questions if there are CLEAR gaps (missing metrics, unclear impact, vague technologies). If a bullet is already strong, don't ask about it.
 
 Focus on:
 1. Quantifiable metrics and achievements they may have omitted
@@ -181,14 +184,17 @@ TARGET JOB DESCRIPTION:
 CURRENT RESUME BULLETS:
 {bullets_text}
 {context_str}
-Generate {max_questions} NEW questions (different from any previously answered questions above) that will help improve these bullets. Return ONLY valid JSON in this format:
+For each bullet that needs clarification, generate a question. Associate each question with the bullet number it's about.
+
+Return ONLY valid JSON in this format (with as many or as few questions as needed, up to {max_questions}):
 [
-  {{"question": "...", "type": "metrics"}},
-  {{"question": "...", "type": "technical"}},
-  {{"question": "...", "type": "impact"}}
+  {{"question": "...", "type": "metrics", "bullet_index": 0}},
+  {{"question": "...", "type": "technical", "bullet_index": 1}},
+  {{"question": "...", "type": "impact", "bullet_index": 0}}
 ]
 
-Valid types: metrics, technical, impact, scope, challenges, achievements"""
+Valid types: metrics, technical, impact, scope, challenges, achievements
+bullet_index is the 0-based index of the bullet (0 for first bullet, 1 for second, etc.)"""
 
     r = client.chat.completions.create(
         model=CHAT_MODEL,
@@ -201,13 +207,20 @@ Valid types: metrics, technical, impact, scope, challenges, achievements"""
     # Parse JSON response
     try:
         questions = _parse_json_questions(raw)
+        # Add bullet_text to each question
+        for q in questions:
+            bullet_idx = q.get("bullet_index", 0)
+            if 0 <= bullet_idx < len(bullets):
+                q["bullet_text"] = bullets[bullet_idx]
+            else:
+                q["bullet_text"] = bullets[0] if bullets else ""
     except Exception as e:
         log.exception(f"Failed to parse questions JSON: {e}")
         # Fallback questions
         questions = [
-            {"question": "What quantifiable metrics or results did you achieve in these roles?", "type": "metrics"},
-            {"question": "What specific technologies or tools relevant to this job did you use?", "type": "technical"},
-            {"question": "What was the business impact of your work?", "type": "impact"}
+            {"question": "What quantifiable metrics or results did you achieve in these roles?", "type": "metrics", "bullet_index": 0, "bullet_text": bullets[0] if bullets else ""},
+            {"question": "What specific technologies or tools relevant to this job did you use?", "type": "technical", "bullet_index": 0, "bullet_text": bullets[0] if bullets else ""},
+            {"question": "What was the business impact of your work?", "type": "impact", "bullet_index": 0, "bullet_text": bullets[0] if bullets else ""}
         ]
 
     return questions[:max_questions]
@@ -224,7 +237,7 @@ def _parse_json_questions(s: str) -> List[Dict[str, str]]:
     if not isinstance(data, list):
         raise ValueError("Expected a list of questions")
 
-    return [{"question": q.get("question", ""), "type": q.get("type", "general")}
+    return [{"question": q.get("question", ""), "type": q.get("type", "general"), "bullet_index": q.get("bullet_index", 0)}
             for q in data if isinstance(q, dict) and "question" in q]
 
 
@@ -244,9 +257,6 @@ def should_ask_more_questions(answered_qa: List[Dict[str, str]], bullets: List[s
     if not client:
         return False, "OpenAI client not available"
 
-    if len(answered_qa) >= 10:
-        return False, "Maximum questions reached"
-
     if len(answered_qa) == 0:
         return True, "No questions answered yet"
 
@@ -256,16 +266,20 @@ def should_ask_more_questions(answered_qa: List[Dict[str, str]], bullets: List[s
 
     prompt = f"""You are evaluating if there is enough context to write strong, tailored resume bullets.
 
+IMPORTANT: Be conservative. Only ask for more information if there are CLEAR, CRITICAL gaps. If you have enough information to write solid bullets with metrics and impact, say YES.
+
 ORIGINAL BULLETS:
 {bullets_text}
 
 TARGET JOB:
 {job_description}
 
-INFORMATION GATHERED:
+INFORMATION GATHERED ({len(answered_qa)} questions answered):
 {qa_text}
 
 Based on this information, do you have enough context to write compelling, tailored resume bullets with metrics, impact, and relevant technical details?
+
+Be biased towards YES - only say NO if there are critical missing pieces of information.
 
 Answer with ONLY "YES" or "NO" followed by a brief reason (one sentence).
 Format: YES|reason or NO|reason"""

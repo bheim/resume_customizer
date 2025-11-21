@@ -76,7 +76,7 @@ def get_qa_session(session_id: str) -> Optional[Dict[str, Any]]:
 
 
 def store_qa_pair(session_id: str, question: str, answer: Optional[str] = None,
-                  question_type: Optional[str] = None) -> Optional[str]:
+                  question_type: Optional[str] = None, bullet_index: Optional[int] = None) -> Optional[str]:
     """
     Store a Q&A pair in the database.
 
@@ -85,6 +85,7 @@ def store_qa_pair(session_id: str, question: str, answer: Optional[str] = None,
         question: The question text
         answer: The answer text (can be None if not yet answered)
         question_type: Type/category of the question
+        bullet_index: Index of the bullet this question is about (optional)
 
     Returns:
         Q&A pair ID if successful, None otherwise
@@ -98,6 +99,7 @@ def store_qa_pair(session_id: str, question: str, answer: Optional[str] = None,
             "question": question,
             "answer": answer,
             "question_type": question_type,
+            "bullet_index": bullet_index,
             "answered_at": datetime.utcnow().isoformat() if answer else None
         }
 

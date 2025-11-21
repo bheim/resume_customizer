@@ -54,3 +54,7 @@ $$ language 'plpgsql';
 -- Trigger to automatically update updated_at
 CREATE TRIGGER update_qa_sessions_updated_at BEFORE UPDATE ON qa_sessions
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- Add bullet_index column to qa_pairs table (for associating questions with specific bullets)
+-- Run this ALTER TABLE if bullet_index doesn't exist yet
+ALTER TABLE qa_pairs ADD COLUMN IF NOT EXISTS bullet_index INTEGER;

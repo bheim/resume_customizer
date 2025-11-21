@@ -426,7 +426,9 @@ async def generate_results(file: UploadFile = File(...), session_id: str = Form(
     resume_before = "\n".join(bullets)
     try:
         score_before = composite_score(resume_before, job_description)
+        log.info(f"Score BEFORE: {score_before}")
     except Exception as e:
+        log.exception(f"Failed to calculate score_before: {e}")
         score_before = {"embed_sim": 0.0, "keyword_cov": 0.0, "llm_score": 0.0, "composite": 0.0, "error": str(e)}
 
     # Get answered Q&A pairs for context
@@ -464,7 +466,9 @@ async def generate_results(file: UploadFile = File(...), session_id: str = Form(
     resume_after = "\n".join(final_texts)
     try:
         score_after = composite_score(resume_after, job_description)
+        log.info(f"Score AFTER: {score_after}")
     except Exception as e:
+        log.exception(f"Failed to calculate score_after: {e}")
         score_after = {"embed_sim": 0.0, "keyword_cov": 0.0, "llm_score": 0.0, "composite": 0.0, "error": str(e)}
 
     # Calculate deltas
@@ -476,7 +480,9 @@ async def generate_results(file: UploadFile = File(...), session_id: str = Form(
             "llm_score": round(score_after["llm_score"] - score_before["llm_score"], 1),
             "composite": round(score_after["composite"] - score_before["composite"], 1),
         }
-    except Exception:
+        log.info(f"Score DELTA: {delta}")
+    except Exception as e:
+        log.exception(f"Failed to calculate delta: {e}")
         pass
 
     # Enforce single page layout
@@ -496,15 +502,24 @@ async def generate_results(file: UploadFile = File(...), session_id: str = Form(
     # Return the file as a download with scores in custom headers
     # This avoids JSON parsing issues with large base64 strings
     import json
+
+    # Log what we're sending in headers
+    headers_to_send = {
+        "Content-Disposition": 'attachment; filename="resume_customized.docx"',
+        "X-Session-Id": session_id,
+        "X-Score-Before": json.dumps(score_before),
+        "X-Score-After": json.dumps(score_after),
+        "X-Score-Delta": json.dumps(delta),
+        "X-QA-Context-Used": str(len(qa_context))
+    }
+    log.info(f"Response headers being sent:")
+    log.info(f"  X-Score-Before: {headers_to_send['X-Score-Before']}")
+    log.info(f"  X-Score-After: {headers_to_send['X-Score-After']}")
+    log.info(f"  X-Score-Delta: {headers_to_send['X-Score-Delta']}")
+    log.info(f"  X-QA-Context-Used: {headers_to_send['X-QA-Context-Used']}")
+
     return Response(
         content=data,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={
-            "Content-Disposition": 'attachment; filename="resume_customized.docx"',
-            "X-Session-Id": session_id,
-            "X-Score-Before": json.dumps(score_before),
-            "X-Score-After": json.dumps(score_after),
-            "X-Score-Delta": json.dumps(delta),
-            "X-QA-Context-Used": str(len(qa_context))
-        }
+        headers=headers_to_send
     )

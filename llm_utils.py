@@ -159,9 +159,10 @@ def generate_followup_questions(bullets: List[str], job_description: str,
     # Build context string from existing Q&A
     context_str = ""
     if existing_context:
-        context_str = "\n\nPREVIOUSLY ANSWERED QUESTIONS:\n"
+        context_str = "\n\nPREVIOUSLY ANSWERED QUESTIONS (DO NOT ask similar or duplicate questions):\n"
         for qa in existing_context:
             context_str += f"Q: {qa['question']}\nA: {qa['answer']}\n\n"
+        context_str += "IMPORTANT: Do NOT generate questions that are similar to or overlap with the questions above. The user has already provided this information.\n"
 
     bullets_text = "\n".join([f"{i+1}. {b}" for i, b in enumerate(bullets)])
 
@@ -180,7 +181,7 @@ TARGET JOB DESCRIPTION:
 CURRENT RESUME BULLETS:
 {bullets_text}
 {context_str}
-Generate {max_questions} questions that will help improve these bullets. Return ONLY valid JSON in this format:
+Generate {max_questions} NEW questions (different from any previously answered questions above) that will help improve these bullets. Return ONLY valid JSON in this format:
 [
   {{"question": "...", "type": "metrics"}},
   {{"question": "...", "type": "technical"}},

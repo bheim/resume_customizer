@@ -179,7 +179,11 @@ async def generate_questions(file: UploadFile = File(...), job_description: str 
     if user_id and user_id != "anonymous":
         user_context = get_user_context(user_id)
         existing_context = [{"question": ctx["question"], "answer": ctx["answer"]} for ctx in user_context]
-        log.info(f"Found {len(existing_context)} existing Q&A pairs for user")
+        log.info(f"Found {len(existing_context)} existing Q&A pairs for user {user_id}")
+        if existing_context:
+            log.info(f"Existing questions for context: {[qa['question'] for qa in existing_context[:5]]}")  # Log first 5
+    else:
+        log.info(f"No user_id provided or anonymous user, skipping context retrieval")
 
     # Create Q&A session
     session_id = create_qa_session(user_id, job_description, bullets)
@@ -259,8 +263,15 @@ async def submit_answers(submission: AnswerSubmission = Body(...)):
 
     # Store in user context if user_id provided
     if user_id and user_id != "anonymous":
+        log.info(f"Storing {len(answered_qa)} Q&A pairs in user_context for user {user_id}")
         for qa in answered_qa:
-            store_user_context(user_id, qa["question"], qa["answer"])
+            success = store_user_context(user_id, qa["question"], qa["answer"])
+            if success:
+                log.info(f"Stored in user_context: {qa['question'][:50]}...")
+            else:
+                log.warning(f"Failed to store in user_context: {qa['question'][:50]}...")
+    else:
+        log.info(f"No user_id or anonymous - not storing in user_context")
 
     # Determine if more questions are needed
     bullets = session["bullets"]

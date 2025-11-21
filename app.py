@@ -14,8 +14,14 @@ from db_utils import (create_qa_session, get_qa_session, store_qa_pair, update_q
                       update_session_status, get_answered_qa_pairs)
 
 app = FastAPI()
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
-                   allow_methods=["POST","GET","OPTIONS"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["POST", "GET", "OPTIONS"],
+    allow_headers=["*"],
+    expose_headers=["X-Score-Before", "X-Score-After", "X-Score-Delta", "X-QA-Context-Used", "X-Session-Id"]
+)
 
 
 # Pydantic models for Q&A endpoints

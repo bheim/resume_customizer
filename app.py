@@ -190,9 +190,9 @@ async def generate_questions(file: UploadFile = File(...), job_description: str 
     if not session_id:
         return JSONResponse({"error": "failed_to_create_session"}, status_code=500)
 
-    # Generate questions using LLM
+    # Generate questions using LLM (let LLM decide how many, up to 10)
     try:
-        questions = generate_followup_questions(bullets, job_description, existing_context, max_questions=3)
+        questions = generate_followup_questions(bullets, job_description, existing_context, max_questions=10)
     except Exception as e:
         log.exception("Failed to generate questions")
         return JSONResponse({"error": "question_generation_failed", "detail": str(e)}, status_code=502)
@@ -200,13 +200,15 @@ async def generate_questions(file: UploadFile = File(...), job_description: str 
     # Store questions in database
     qa_pairs = []
     for q in questions:
-        qa_id = store_qa_pair(session_id, q["question"], question_type=q["type"])
+        qa_id = store_qa_pair(session_id, q["question"], question_type=q["type"], bullet_index=q.get("bullet_index"))
         if qa_id:
             log.info(f"Created qa_pair with ID: {qa_id} for question: {q['question'][:50]}...")
             qa_pairs.append({
                 "qa_id": qa_id,
                 "question": q["question"],
-                "type": q["type"]
+                "type": q["type"],
+                "bullet_index": q.get("bullet_index", 0),
+                "bullet_text": q.get("bullet_text", "")
             })
         else:
             log.error(f"Failed to store qa_pair for question: {q['question'][:50]}...")
@@ -288,19 +290,19 @@ async def submit_answers(submission: AnswerSubmission = Body(...)):
 
     # If more questions needed, generate them
     new_questions = []
-    # HARDCODING TO CIRCUMVENT NEW QUESTIONS
-    need_more = False
     if need_more:
         try:
-            questions = generate_followup_questions(bullets, job_description, answered_qa, max_questions=2)
+            questions = generate_followup_questions(bullets, job_description, answered_qa, max_questions=10)
 
             for q in questions:
-                qa_id = store_qa_pair(session_id, q["question"], question_type=q["type"])
+                qa_id = store_qa_pair(session_id, q["question"], question_type=q["type"], bullet_index=q.get("bullet_index"))
                 if qa_id:
                     new_questions.append({
                         "qa_id": qa_id,
                         "question": q["question"],
-                        "type": q["type"]
+                        "type": q["type"],
+                        "bullet_index": q.get("bullet_index", 0),
+                        "bullet_text": q.get("bullet_text", "")
                     })
         except Exception as e:
             log.exception("Failed to generate follow-up questions")

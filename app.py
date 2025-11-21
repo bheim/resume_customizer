@@ -192,13 +192,17 @@ async def generate_questions(file: UploadFile = File(...), job_description: str 
     for q in questions:
         qa_id = store_qa_pair(session_id, q["question"], question_type=q["type"])
         if qa_id:
+            log.info(f"Created qa_pair with ID: {qa_id} for question: {q['question'][:50]}...")
             qa_pairs.append({
                 "qa_id": qa_id,
                 "question": q["question"],
                 "type": q["type"]
             })
+        else:
+            log.error(f"Failed to store qa_pair for question: {q['question'][:50]}...")
 
     log.info(f"Generated {len(qa_pairs)} questions for session {session_id}")
+    log.info(f"Returning qa_ids to frontend: {[qp['qa_id'] for qp in qa_pairs]}")
 
     return JSONResponse({
         "session_id": session_id,
@@ -219,6 +223,9 @@ async def submit_answers(submission: AnswerSubmission = Body(...)):
     session_id = submission.session_id
     answers = submission.answers
     user_id = submission.user_id
+
+    log.info(f"Received answers for session {session_id}")
+    log.info(f"qa_ids received from frontend: {[ans.get('qa_id') for ans in answers]}")
 
     # Validate session exists
     session = get_qa_session(session_id)
@@ -264,6 +271,8 @@ async def submit_answers(submission: AnswerSubmission = Body(...)):
 
     # If more questions needed, generate them
     new_questions = []
+    # HARDCODING TO CIRCUMVENT NEW QUESTIONS
+    need_more = False
     if need_more:
         try:
             questions = generate_followup_questions(bullets, job_description, answered_qa, max_questions=2)
@@ -373,7 +382,7 @@ async def rewrite_with_qa(session_id: str = Form(...), max_chars_override: Optio
 async def generate_results(file: UploadFile = File(...), session_id: str = Form(...), max_chars_override: Optional[int] = Form(None)):
     """
     Generate final resume DOCX with bullets rewritten using Q&A context.
-    Returns JSON with scores and base64-encoded file for download.
+    Accepts the original resume file and session_id, returns modified DOCX for download.
     """
     log.info(f"Received generate_results request for session: {session_id}")
 
@@ -413,13 +422,6 @@ async def generate_results(file: UploadFile = File(...), session_id: str = Form(
 
     job_description = session["job_description"]
 
-    # Calculate before score
-    resume_before = "\n".join(bullets)
-    try:
-        score_before = composite_score(resume_before, job_description)
-    except Exception as e:
-        score_before = {"embed_sim": 0.0, "keyword_cov": 0.0, "llm_score": 0.0, "composite": 0.0, "error": str(e)}
-
     # Get answered Q&A pairs for context
     qa_context = get_answered_qa_pairs(session_id)
 
@@ -451,25 +453,6 @@ async def generate_results(file: UploadFile = File(...), session_id: str = Form(
         set_paragraph_text_with_selective_links(p, fitted)
         final_texts.append(fitted)
 
-    # Calculate after score
-    resume_after = "\n".join(final_texts)
-    try:
-        score_after = composite_score(resume_after, job_description)
-    except Exception as e:
-        score_after = {"embed_sim": 0.0, "keyword_cov": 0.0, "llm_score": 0.0, "composite": 0.0, "error": str(e)}
-
-    # Calculate deltas
-    delta = {}
-    try:
-        delta = {
-            "embed_sim": round(score_after["embed_sim"] - score_before["embed_sim"], 4),
-            "keyword_cov": round(score_after["keyword_cov"] - score_before["keyword_cov"], 4),
-            "llm_score": round(score_after["llm_score"] - score_before["llm_score"], 1),
-            "composite": round(score_after["composite"] - score_before["composite"], 1),
-        }
-    except Exception:
-        pass
-
     # Enforce single page layout
     enforce_single_page(doc)
 
@@ -479,20 +462,14 @@ async def generate_results(file: UploadFile = File(...), session_id: str = Form(
     doc.save(buf)
     data = buf.getvalue()
 
-    # Encode file as base64 for JSON response
-    b64 = base64.b64encode(data).decode("ascii")
-
     # Mark session as completed
     update_session_status(session_id, "completed")
 
-    log.info(f"Returning modified DOCX and scores for session {session_id}")
+    log.info(f"Returning modified DOCX for session {session_id}")
 
-    # Return JSON with scores and file
-    return JSONResponse({
-        "session_id": session_id,
-        "file_b64": b64,
-        "mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "filename": "resume_customized.docx",
-        "scores": {"before": score_before, "after": score_after, "delta": delta},
-        "qa_context_used": len(qa_context)
-    })
+    # Return the modified DOCX file as download
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": 'attachment; filename="resume_customized.docx"'}
+    )

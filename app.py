@@ -422,6 +422,13 @@ async def generate_results(file: UploadFile = File(...), session_id: str = Form(
 
     job_description = session["job_description"]
 
+    # Calculate before score
+    resume_before = "\n".join(bullets)
+    try:
+        score_before = composite_score(resume_before, job_description)
+    except Exception as e:
+        score_before = {"embed_sim": 0.0, "keyword_cov": 0.0, "llm_score": 0.0, "composite": 0.0, "error": str(e)}
+
     # Get answered Q&A pairs for context
     qa_context = get_answered_qa_pairs(session_id)
 
@@ -452,6 +459,25 @@ async def generate_results(file: UploadFile = File(...), session_id: str = Form(
         fitted = enforce_char_cap_with_reprompt(new_text, cap)
         set_paragraph_text_with_selective_links(p, fitted)
         final_texts.append(fitted)
+
+    # Calculate after score
+    resume_after = "\n".join(final_texts)
+    try:
+        score_after = composite_score(resume_after, job_description)
+    except Exception as e:
+        score_after = {"embed_sim": 0.0, "keyword_cov": 0.0, "llm_score": 0.0, "composite": 0.0, "error": str(e)}
+
+    # Calculate deltas
+    delta = {}
+    try:
+        delta = {
+            "embed_sim": round(score_after["embed_sim"] - score_before["embed_sim"], 4),
+            "keyword_cov": round(score_after["keyword_cov"] - score_before["keyword_cov"], 4),
+            "llm_score": round(score_after["llm_score"] - score_before["llm_score"], 1),
+            "composite": round(score_after["composite"] - score_before["composite"], 1),
+        }
+    except Exception:
+        pass
 
     # Enforce single page layout
     enforce_single_page(doc)

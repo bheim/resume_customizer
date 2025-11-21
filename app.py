@@ -378,35 +378,55 @@ async def rewrite_with_qa(session_id: str = Form(...), max_chars_override: Optio
     })
 
 
-class GenerateResultsRequest(BaseModel):
-    session_id: str
-    max_chars_override: Optional[int] = None
-
-
 @app.post("/generate_results")
-async def generate_results(request: GenerateResultsRequest = Body(...)):
+async def generate_results(file: UploadFile = File(...), session_id: str = Form(...), max_chars_override: Optional[int] = Form(None)):
     """
-    Generate final resume results using Q&A context from the session.
-    Accepts JSON body (unlike /rewrite_with_qa which uses Form data).
+    Generate final resume DOCX with bullets rewritten using Q&A context.
+    Accepts the original resume file and session_id, returns modified DOCX for download.
     """
-    log.info(f"Received generate_results request for session: {request.session_id}")
+    log.info(f"Received generate_results request for session: {session_id}")
 
     if not supabase:
         return JSONResponse({"error": "supabase_not_configured"}, status_code=503)
 
+    # Read and validate file
+    raw = await file.read()
+    size = len(raw)
+    ct = file.content_type
+    log.info(f"generate_results recv file='{file.filename}' size={size}")
+
+    if not raw or size < 512:
+        return JSONResponse({"error": "empty_or_small_file"}, status_code=400)
+
+    if ct not in {"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                  "application/octet-stream", "application/msword"}:
+        return JSONResponse({"error": "bad_content_type", "got": ct}, status_code=415)
+
+    # Parse DOCX
+    try:
+        doc = load_docx(raw)
+    except Exception as e:
+        log.exception("bad_docx")
+        return JSONResponse({"error": "bad_docx", "detail": str(e)}, status_code=400)
+
+    bullets, paras = collect_word_numbered_bullets(doc)
+    if not bullets:
+        return JSONResponse({"error": "no_bullets_found"}, status_code=422)
+
+    log.info(f"Found {len(bullets)} bullets in uploaded file")
+
     # Validate session exists
-    session = get_qa_session(request.session_id)
+    session = get_qa_session(session_id)
     if not session:
         return JSONResponse({"error": "session_not_found"}, status_code=404)
 
-    bullets = session["bullets"]
     job_description = session["job_description"]
 
     # Get answered Q&A pairs for context
-    qa_context = get_answered_qa_pairs(request.session_id)
+    qa_context = get_answered_qa_pairs(session_id)
 
     if not qa_context:
-        log.warning(f"No Q&A context found for session {request.session_id}, falling back to basic rewrite")
+        log.warning(f"No Q&A context found for session {session_id}, falling back to basic rewrite")
         try:
             rewritten = rewrite_with_openai(bullets, job_description)
         except Exception as e:
@@ -420,36 +440,36 @@ async def generate_results(request: GenerateResultsRequest = Body(...)):
             log.exception("openai_failed_with_context")
             return JSONResponse({"error": "openai_failed", "detail": str(e)}, status_code=502)
 
-    resume_before = "\n".join(bullets)
-    try:
-        score_before = composite_score(resume_before, job_description)
-    except Exception as e:
-        score_before = {"embed_sim": 0.0, "keyword_cov": 0.0, "llm_score": 0.0, "composite": 0.0, "error": str(e)}
+    log.info(f"Rewritten {len(rewritten)} bullets")
 
-    resume_after = "\n".join(rewritten)
-    try:
-        score_after = composite_score(resume_after, job_description)
-    except Exception as e:
-        score_after = {"embed_sim": 0.0, "keyword_cov": 0.0, "llm_score": 0.0, "composite": 0.0, "error": str(e)}
+    if len(rewritten) != len(paras):
+        return JSONResponse({"error": "bullet_count_mismatch", "in": len(paras), "out": len(rewritten)}, status_code=500)
 
-    delta = {}
-    try:
-        delta = {
-            "embed_sim": round(score_after["embed_sim"] - score_before["embed_sim"], 4),
-            "keyword_cov": round(score_after["keyword_cov"] - score_before["keyword_cov"], 4),
-            "llm_score": round(score_after["llm_score"] - score_before["llm_score"], 1),
-            "composite": round(score_after["composite"] - score_before["composite"], 1),
-        }
-    except Exception:
-        pass
+    # Update document with rewritten bullets, enforcing character limits
+    final_texts = []
+    for idx, (p, orig, new_text) in enumerate(zip(paras, bullets, rewritten)):
+        cap = tiered_char_cap(len(orig), max_chars_override)
+        fitted = enforce_char_cap_with_reprompt(new_text, cap)
+        set_paragraph_text_with_selective_links(p, fitted)
+        final_texts.append(fitted)
+
+    # Enforce single page layout
+    enforce_single_page(doc)
+
+    # Save modified document to bytes
+    from io import BytesIO
+    buf = BytesIO()
+    doc.save(buf)
+    data = buf.getvalue()
 
     # Mark session as completed
-    update_session_status(request.session_id, "completed")
+    update_session_status(session_id, "completed")
 
-    return JSONResponse({
-        "session_id": request.session_id,
-        "original_bullets": bullets,
-        "rewritten_bullets": rewritten,
-        "scores": {"before": score_before, "after": score_after, "delta": delta},
-        "qa_context_used": len(qa_context)
-    })
+    log.info(f"Returning modified DOCX for session {session_id}")
+
+    # Return the modified DOCX file as download
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": 'attachment; filename="resume_customized.docx"'}
+    )

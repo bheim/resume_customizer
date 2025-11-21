@@ -467,9 +467,18 @@ async def generate_results(file: UploadFile = File(...), session_id: str = Form(
 
     log.info(f"Returning modified DOCX for session {session_id}")
 
-    # Return the modified DOCX file as download
+    # Return the file as a download with scores in custom headers
+    # This avoids JSON parsing issues with large base64 strings
+    import json
     return Response(
         content=data,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": 'attachment; filename="resume_customized.docx"'}
+        headers={
+            "Content-Disposition": 'attachment; filename="resume_customized.docx"',
+            "X-Session-Id": session_id,
+            "X-Score-Before": json.dumps(score_before),
+            "X-Score-After": json.dumps(score_after),
+            "X-Score-Delta": json.dumps(delta),
+            "X-QA-Context-Used": str(len(qa_context))
+        }
     )

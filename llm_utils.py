@@ -395,3 +395,624 @@ Return ONLY a JSON array of {n} rewritten bullets like: ["...", "..."]"""
 
     log.info(f"OpenAI response lines with context: {len(lines)}")
     return lines
+
+
+def extract_facts_from_qa(bullet_text: str, qa_pairs: List[Dict[str, str]]) -> Dict:
+    """
+    Extract structured facts from Q&A conversation for a single bullet.
+
+    This function converts raw Q&A pairs into a structured format that can be:
+    1. Shown to the user for confirmation/editing
+    2. Stored in the database for future use
+    3. Used to generate tailored bullets without re-asking questions
+
+    Args:
+        bullet_text: The original bullet text
+        qa_pairs: List of {"question": str, "answer": str} dictionaries
+
+    Returns:
+        Structured facts following BulletFacts schema:
+        {
+            "metrics": {
+                "quantifiable_achievements": [...],
+                "scale": [...]
+            },
+            "technical_details": {
+                "technologies": [...],
+                "methodologies": [...]
+            },
+            "impact": {
+                "business_outcomes": [...],
+                "stakeholder_value": [...]
+            },
+            "context": {
+                "challenges_solved": [...],
+                "scope": [...],
+                "role": [...]
+            },
+            "raw_qa": [...]  # Original Q&A preserved
+        }
+    """
+    if not client:
+        raise RuntimeError("OPENAI_API_KEY missing")
+
+    # Build Q&A text
+    qa_text = ""
+    for qa in qa_pairs:
+        qa_text += f"Q: {qa['question']}\nA: {qa['answer']}\n\n"
+
+    prompt = f"""You are extracting structured facts from a Q&A conversation about a resume bullet.
+
+ORIGINAL BULLET:
+{bullet_text}
+
+Q&A CONVERSATION:
+{qa_text}
+
+Extract and organize the facts from this conversation into structured categories. Be comprehensive but accurate - only include information that was explicitly stated in the answers.
+
+Return STRICT JSON with this exact structure:
+
+{{
+  "metrics": {{
+    "quantifiable_achievements": ["Achievement with number/percentage", "Another metric"],
+    "scale": ["Team size", "Volume/scale numbers", "Timeline/duration"]
+  }},
+  "technical_details": {{
+    "technologies": ["Specific tools", "Languages", "Frameworks", "Platforms"],
+    "methodologies": ["Agile", "CI/CD", "Specific processes"]
+  }},
+  "impact": {{
+    "business_outcomes": ["Revenue impact", "Efficiency gains", "User metrics"],
+    "stakeholder_value": ["How it helped specific teams/users", "Business value"]
+  }},
+  "context": {{
+    "challenges_solved": ["Specific problems addressed"],
+    "scope": ["Project timeline", "Team structure", "Organizational scope"],
+    "role": ["Specific contributions", "Leadership aspects", "Responsibilities"]
+  }}
+}}
+
+IMPORTANT:
+- Only include facts that are clearly stated in the answers
+- Use exact numbers/percentages when provided
+- Keep each item concise (1-2 sentences max)
+- If a category has no information, use an empty array
+- Do NOT include the raw Q&A in this structure (that will be added separately)
+- Return ONLY valid JSON, no commentary or code fences"""
+
+    r = client.chat.completions.create(
+        model=CHAT_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0
+    )
+
+    raw = (r.choices[0].message.content or "").strip()
+
+    # Parse JSON response
+    try:
+        # Clean potential code fences
+        if raw.startswith("```"):
+            raw = raw.strip("`")
+            raw = re.sub(r"^\s*json", "", raw, flags=re.I).strip()
+
+        facts = loads(raw)
+
+        # Validate structure
+        expected_keys = {
+            "metrics": ["quantifiable_achievements", "scale"],
+            "technical_details": ["technologies", "methodologies"],
+            "impact": ["business_outcomes", "stakeholder_value"],
+            "context": ["challenges_solved", "scope", "role"]
+        }
+
+        for category, subkeys in expected_keys.items():
+            if category not in facts:
+                facts[category] = {}
+            for subkey in subkeys:
+                if subkey not in facts[category]:
+                    facts[category][subkey] = []
+
+        # Add raw Q&A for reference
+        facts["raw_qa"] = qa_pairs
+
+        log.info(f"Extracted facts for bullet: {len(qa_pairs)} Q&A pairs")
+        return facts
+
+    except Exception as e:
+        log.exception(f"Failed to parse facts JSON: {e}")
+        # Return minimal structure with raw Q&A
+        return {
+            "metrics": {"quantifiable_achievements": [], "scale": []},
+            "technical_details": {"technologies": [], "methodologies": []},
+            "impact": {"business_outcomes": [], "stakeholder_value": []},
+            "context": {"challenges_solved": [], "scope": [], "role": []},
+            "raw_qa": qa_pairs
+        }
+
+
+def generate_bullet_with_facts(original_bullet: str, job_description: str,
+                               stored_facts: Dict, char_limit: Optional[int] = None) -> str:
+    """
+    Generate enhanced bullet using stored facts instead of raw Q&A.
+
+    This is the optimized generation flow that uses pre-extracted, user-confirmed facts.
+
+    Args:
+        original_bullet: The original bullet text
+        job_description: Target job description
+        stored_facts: Structured facts from extract_facts_from_qa()
+        char_limit: Optional character limit for the bullet
+
+    Returns:
+        Enhanced bullet string
+    """
+    if not client:
+        raise RuntimeError("OPENAI_API_KEY missing")
+
+    # Build facts context
+    facts_text = ""
+
+    # Metrics
+    if stored_facts.get("metrics"):
+        metrics = stored_facts["metrics"]
+        if metrics.get("quantifiable_achievements"):
+            facts_text += "Quantifiable Achievements:\n"
+            for item in metrics["quantifiable_achievements"]:
+                facts_text += f"• {item}\n"
+        if metrics.get("scale"):
+            facts_text += "Scale/Scope:\n"
+            for item in metrics["scale"]:
+                facts_text += f"• {item}\n"
+
+    # Technical details
+    if stored_facts.get("technical_details"):
+        tech = stored_facts["technical_details"]
+        if tech.get("technologies"):
+            facts_text += f"Technologies: {', '.join(tech['technologies'])}\n"
+        if tech.get("methodologies"):
+            facts_text += f"Methodologies: {', '.join(tech['methodologies'])}\n"
+
+    # Impact
+    if stored_facts.get("impact"):
+        impact = stored_facts["impact"]
+        if impact.get("business_outcomes"):
+            facts_text += "Business Impact:\n"
+            for item in impact["business_outcomes"]:
+                facts_text += f"• {item}\n"
+        if impact.get("stakeholder_value"):
+            facts_text += "Stakeholder Value:\n"
+            for item in impact["stakeholder_value"]:
+                facts_text += f"• {item}\n"
+
+    # Context
+    if stored_facts.get("context"):
+        context = stored_facts["context"]
+        if context.get("challenges_solved"):
+            facts_text += "Challenges Solved:\n"
+            for item in context["challenges_solved"]:
+                facts_text += f"• {item}\n"
+        if context.get("scope"):
+            facts_text += "Project Scope:\n"
+            for item in context["scope"]:
+                facts_text += f"• {item}\n"
+        if context.get("role"):
+            facts_text += "Your Role:\n"
+            for item in context["role"]:
+                facts_text += f"• {item}\n"
+
+    char_limit_text = f"\nIMPORTANT: Keep the bullet under {char_limit} characters." if char_limit else ""
+
+    prompt = f"""You are a professional resume writer. Rewrite this bullet using the provided facts and tailoring it to the job description.
+
+ORIGINAL BULLET:
+{original_bullet}
+
+TARGET JOB DESCRIPTION:
+{job_description}
+
+VERIFIED FACTS ABOUT THIS EXPERIENCE:
+{facts_text}
+
+REWRITING GUIDELINES:
+• Use the Google XYZ formula: Accomplished [X] as measured by [Y] by doing [Z]
+• Incorporate specific metrics and achievements from the facts
+• Align with the job description's requirements and terminology
+• Preserve ownership language and demonstrate impact
+• Keep it concise and powerful
+• DO NOT add information not present in the facts{char_limit_text}
+
+Return ONLY the rewritten bullet, no commentary or explanation."""
+
+    r = client.chat.completions.create(
+        model=CHAT_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0
+    )
+
+    enhanced_bullet = (r.choices[0].message.content or "").strip()
+
+    # Clean up any bullet markers or extra formatting
+    enhanced_bullet = enhanced_bullet.lstrip("-• ").strip()
+
+    log.info(f"Generated bullet with facts: {len(enhanced_bullet)} chars")
+    return enhanced_bullet
+
+
+def generate_bullets_with_facts(bullets: List[str], job_description: str,
+                                bullet_facts_map: Dict[int, Dict]) -> List[str]:
+    """
+    Generate enhanced bullets for multiple bullets using stored facts.
+
+    Args:
+        bullets: List of original bullets
+        job_description: Target job description
+        bullet_facts_map: Dictionary mapping bullet index to stored facts
+                         {0: facts_dict, 1: facts_dict, ...}
+
+    Returns:
+        List of enhanced bullets (same length as input)
+    """
+    if not client:
+        raise RuntimeError("OPENAI_API_KEY missing")
+
+    enhanced_bullets = []
+
+    for idx, bullet in enumerate(bullets):
+        if idx in bullet_facts_map and bullet_facts_map[idx]:
+            # Use facts-based generation
+            log.info(f"Generating bullet {idx+1} with stored facts")
+            enhanced = generate_bullet_with_facts(bullet, job_description, bullet_facts_map[idx])
+            enhanced_bullets.append(enhanced)
+        else:
+            # Fallback to basic rewriting (no facts available)
+            log.info(f"Generating bullet {idx+1} without facts (fallback to basic rewrite)")
+            # Use single-bullet rewrite (we'll create a simple version)
+            enhanced_bullets.append(bullet)  # Placeholder - can improve with basic rewrite logic
+
+    return enhanced_bullets
+
+# =====================================================================
+# NEW CONVERSATIONAL & IMPROVED PROMPTS
+# =====================================================================
+
+def generate_conversational_question(bullet_text: str) -> str:
+    """
+    Generate an initial conversational question to start gathering context about a bullet.
+
+    Uses a friendly, interview-style approach rather than formal Q&A.
+
+    Args:
+        bullet_text: The original bullet text
+
+    Returns:
+        A conversational opening question/prompt
+    """
+    if not client:
+        raise RuntimeError("OPENAI_API_KEY missing")
+
+    system_prompt = """You are a professional resume coach conducting a friendly interview to understand someone's work experience.
+
+Your goal is to help them articulate:
+- What they actually did (specific actions, methods, tools)
+- The results they achieved (metrics, outcomes, impact)
+- The scope and context (team size, budget, scale, timeframe)
+
+Be conversational and encouraging. Ask follow-up questions based on what they share. If they mention something vague, dig deeper for specifics.
+
+Guidelines:
+- Ask 1-2 questions at a time, don't overwhelm
+- When you get good detail on actions, results, and scope, you can wrap up
+- If they seem stuck, give examples: "For instance, did you work with a team? What tools did you use? Any metrics you can share?"
+- Keep it natural - you're having a conversation, not interrogating
+
+When you have enough detail for a strong bullet (actions + results + context), say: "Perfect! I have what I need for this one. Let's move on.\""""
+
+    user_prompt = f"""Let's talk about this experience: "{bullet_text}"
+
+Tell me the story - what did this role actually involve? What were you doing day-to-day, and what results did you achieve?"""
+
+    r = client.chat.completions.create(
+        model=CHAT_MODEL,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        temperature=0.7
+    )
+
+    question = (r.choices[0].message.content or "").strip()
+    log.info(f"Generated conversational question for: {bullet_text[:50]}...")
+    return question
+
+
+def extract_facts_from_conversation(bullet_text: str, conversation_history: str) -> Dict:
+    """
+    Extract structured facts from a conversational exchange about a work experience.
+
+    This is an improved version that handles natural conversation flow.
+
+    Args:
+        bullet_text: The original bullet text
+        conversation_history: Full conversation as a string (Q&A back and forth)
+
+    Returns:
+        Structured facts dictionary with: situation, actions, results, skills, tools, timeline
+    """
+    if not client:
+        raise RuntimeError("OPENAI_API_KEY missing")
+
+    system_prompt = """You are a professional resume expert. Your job is to extract structured facts from a conversation about a work experience.
+
+Extract the following information:
+- Situation/Context: What was the scope, scale, or setting?
+- Actions: Specific things they did (tools, methods, processes)
+- Results: Quantifiable outcomes, metrics, achievements
+- Skills: Technical and soft skills demonstrated
+- Timeline: When this occurred (if mentioned)
+
+Be specific and preserve numbers. If something wasn't mentioned, omit it rather than guessing.
+
+Output as JSON:
+{
+  "situation": "string describing scope/context",
+  "actions": ["action 1", "action 2"],
+  "results": ["result 1 with metrics", "result 2"],
+  "skills": ["skill 1", "skill 2"],
+  "tools": ["tool 1", "tool 2"],
+  "timeline": "when this happened"
+}"""
+
+    user_prompt = f"""Original bullet: "{bullet_text}"
+
+Conversation:
+{conversation_history}
+
+Extract structured facts from this conversation."""
+
+    r = client.chat.completions.create(
+        model=CHAT_MODEL,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        temperature=0
+    )
+
+    raw = (r.choices[0].message.content or "").strip()
+
+    try:
+        # Clean potential code fences
+        if raw.startswith("```"):
+            raw = raw.strip("`")
+            raw = re.sub(r"^\s*json", "", raw, flags=re.I).strip()
+
+        facts = loads(raw)
+
+        # Ensure all expected keys exist
+        default_structure = {
+            "situation": "",
+            "actions": [],
+            "results": [],
+            "skills": [],
+            "tools": [],
+            "timeline": ""
+        }
+
+        for key, default_value in default_structure.items():
+            if key not in facts:
+                facts[key] = default_value
+
+        log.info(f"Extracted facts from conversation for: {bullet_text[:50]}...")
+        return facts
+
+    except Exception as e:
+        log.exception(f"Failed to parse conversation facts: {e}")
+        # Return minimal structure
+        return {
+            "situation": "",
+            "actions": [],
+            "results": [],
+            "skills": [],
+            "tools": [],
+            "timeline": ""
+        }
+
+
+def extract_jd_keywords(job_description: str) -> Dict:
+    """
+    Extract the most important keywords, skills, and requirements from a job description.
+
+    Args:
+        job_description: The full job description text
+
+    Returns:
+        Dictionary with required_skills, nice_to_have_skills, key_responsibilities,
+        experience_level, and industry_context
+    """
+    if not client:
+        raise RuntimeError("OPENAI_API_KEY missing")
+
+    # Check cache
+    h = "keywords:" + jd_hash(job_description)
+    if h in _terms_cache:
+        return _terms_cache[h]
+
+    system_prompt = """Extract the most important keywords, skills, and requirements from this job description.
+
+Focus on:
+- Required skills and technologies
+- Key responsibilities
+- Desired experience/qualifications
+- Important industry terms or methodologies
+
+Output as JSON:
+{
+  "required_skills": ["skill 1", "skill 2"],
+  "nice_to_have_skills": ["skill 3", "skill 4"],
+  "key_responsibilities": ["resp 1", "resp 2"],
+  "experience_level": "description",
+  "industry_context": "relevant industry/domain info"
+}"""
+
+    user_prompt = f"""Job Description:
+{job_description}
+
+Extract key requirements and keywords."""
+
+    r = client.chat.completions.create(
+        model=CHAT_MODEL,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        temperature=0
+    )
+
+    raw = (r.choices[0].message.content or "").strip()
+
+    try:
+        # Clean potential code fences
+        if raw.startswith("```"):
+            raw = raw.strip("`")
+            raw = re.sub(r"^\s*json", "", raw, flags=re.I).strip()
+
+        keywords = loads(raw)
+
+        # Ensure all expected keys exist
+        default_structure = {
+            "required_skills": [],
+            "nice_to_have_skills": [],
+            "key_responsibilities": [],
+            "experience_level": "",
+            "industry_context": ""
+        }
+
+        for key, default_value in default_structure.items():
+            if key not in keywords:
+                keywords[key] = default_value
+
+        # Cache the result
+        _terms_cache[h] = keywords
+
+        log.info(f"Extracted keywords from JD: {len(keywords['required_skills'])} required skills")
+        return keywords
+
+    except Exception as e:
+        log.exception(f"Failed to parse JD keywords: {e}")
+        # Return minimal structure
+        return {
+            "required_skills": [],
+            "nice_to_have_skills": [],
+            "key_responsibilities": [],
+            "experience_level": "",
+            "industry_context": ""
+        }
+
+
+def generate_bullet_with_keywords(
+    original_bullet: str,
+    extracted_facts: Dict,
+    jd_keywords: Dict,
+    char_limit: Optional[int] = 150
+) -> str:
+    """
+    Generate an enhanced bullet using the XYZ format with JD keywords.
+
+    Uses the improved prompt that emphasizes:
+    - XYZ format: "Accomplished [X] as measured by [Y] by doing [Z]"
+    - Strong action verbs
+    - Specific metrics from facts
+    - Keywords from JD naturally integrated
+    - Under character limit
+
+    Args:
+        original_bullet: The original bullet text
+        extracted_facts: Facts extracted from conversation (situation, actions, results, skills, tools)
+        jd_keywords: Keywords extracted from job description
+        char_limit: Maximum character length (default 150)
+
+    Returns:
+        Enhanced bullet string
+    """
+    if not client:
+        raise RuntimeError("OPENAI_API_KEY missing")
+
+    # Build facts summary
+    situation = extracted_facts.get("situation", "")
+    actions = extracted_facts.get("actions", [])
+    results = extracted_facts.get("results", [])
+    skills = extracted_facts.get("skills", [])
+    tools = extracted_facts.get("tools", [])
+
+    actions_list = "\n".join([f"- {a}" for a in actions]) if actions else "Not specified"
+    results_list = "\n".join([f"- {r}" for r in results]) if results else "Not specified"
+    skills_list = ", ".join(skills) if skills else "Not specified"
+    tools_list = ", ".join(tools) if tools else "Not specified"
+
+    # Build JD requirements summary
+    required_skills = ", ".join(jd_keywords.get("required_skills", []))
+    key_responsibilities = "\n".join([f"- {r}" for r in jd_keywords.get("key_responsibilities", [])])
+
+    system_prompt = """You are a professional resume writer. Generate a compelling resume bullet that:
+
+1. Uses the XYZ format: "Accomplished [X] as measured by [Y] by doing [Z]"
+2. Starts with a strong action verb (Led, Developed, Drove, Implemented, etc.)
+3. Includes specific metrics when available
+4. Emphasizes keywords from the job description naturally
+5. Is 1-2 lines maximum (under 150 characters ideal)
+6. Uses active voice and professional tone
+
+CRITICAL RULES:
+- Only use facts provided - never invent metrics or details
+- If no metrics available, focus on scope and methods
+- Emphasize the most relevant aspects for this specific job
+- Be specific and concrete, avoid generic statements"""
+
+    char_limit_text = f"\n\nIMPORTANT: Keep under {char_limit} characters." if char_limit else ""
+
+    user_prompt = f"""Target Job Requirements:
+{required_skills}
+
+Key Responsibilities:
+{key_responsibilities}
+
+Original Bullet: "{original_bullet}"
+
+Available Facts:
+Situation: {situation}
+
+Actions:
+{actions_list}
+
+Results:
+{results_list}
+
+Skills: {skills_list}
+Tools: {tools_list}
+
+Generate ONE enhanced bullet that emphasizes the most relevant aspects for this job description.{char_limit_text}"""
+
+    r = client.chat.completions.create(
+        model=CHAT_MODEL,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        temperature=0
+    )
+
+    enhanced_bullet = (r.choices[0].message.content or "").strip()
+
+    # Clean up any bullet markers or extra formatting
+    enhanced_bullet = enhanced_bullet.lstrip("-• ").strip()
+
+    # Enforce character limit if needed
+    if char_limit and len(enhanced_bullet) > char_limit:
+        log.warning(f"Bullet exceeds {char_limit} chars: {len(enhanced_bullet)}")
+        # Truncate at last complete word before limit
+        truncated = enhanced_bullet[:char_limit].rsplit(' ', 1)[0] + "..."
+        enhanced_bullet = truncated
+
+    log.info(f"Generated enhanced bullet: {len(enhanced_bullet)} chars")
+    return enhanced_bullet

@@ -118,6 +118,7 @@ const { bullets } = await response.json();
 │  │                                            │ │
 │  └───────────────────────────────────────────┘ │
 │                                                 │
+│  [  Skip This Bullet  ]                         │
 │  [  Skip Question  ]   [  Submit Answer  ]      │
 └─────────────────────────────────────────────────┘
 ```
@@ -184,6 +185,33 @@ User A2: "We delivered 3 major features and reduced bugs by 30%"
 AI: ✓ "Thanks! I have enough context."
 → Go to Screen 4
 ```
+
+**STEP 4: SKIP THIS BULLET** (if user doesn't have additional context)
+
+**IMPORTANT:** User can click "Skip This Bullet" button at any time to skip adding context for this bullet entirely.
+
+**What happens when user clicks "Skip This Bullet":**
+```typescript
+const handleSkipBullet = () => {
+  // Don't save any facts for this bullet
+  // Move directly to the next bullet
+  const nextIndex = currentBulletIndex + 1;
+
+  if (nextIndex < bullets.length) {
+    // More bullets to process - go to next bullet
+    onSkipBullet();  // Parent component moves to next bullet
+  } else {
+    // All bullets done (some skipped, some completed)
+    onAllBulletsProcessed();  // Go to completion screen
+  }
+};
+```
+
+**User flow:**
+- User clicks "Skip This Bullet"
+- No API calls made
+- Jump directly to next bullet's conversation (or completion screen if last bullet)
+- This bullet will NOT have stored context for future use
 
 ---
 
@@ -434,13 +462,15 @@ interface Props {
   bulletIndex: number;
   totalBullets: number;
   onComplete: (facts: any) => void;
+  onSkipBullet: () => void;  // NEW: Allow skipping this bullet
 }
 
 export default function OnboardingConversation({
   bulletText,
   bulletIndex,
   totalBullets,
-  onComplete
+  onComplete,
+  onSkipBullet
 }: Props) {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [currentQuestion, setCurrentQuestion] = useState('');
@@ -499,6 +529,12 @@ export default function OnboardingConversation({
     }
   };
 
+  const handleSkipBullet = () => {
+    // User doesn't want to add context for this bullet
+    // Skip directly to next bullet
+    onSkipBullet();
+  };
+
   return (
     <div>
       <div>Progress: Bullet {bulletIndex + 1} of {totalBullets}</div>
@@ -523,10 +559,20 @@ export default function OnboardingConversation({
         rows={5}
       />
 
-      <button onClick={() => setUserAnswer('')}>Skip Question</button>
-      <button onClick={handleSubmitAnswer} disabled={loading}>
-        {loading ? 'Submitting...' : 'Submit Answer'}
-      </button>
+      <div style={{ marginTop: '10px' }}>
+        <button onClick={handleSkipBullet} style={{ marginRight: '10px' }}>
+          Skip This Bullet
+        </button>
+      </div>
+
+      <div style={{ marginTop: '10px' }}>
+        <button onClick={() => setUserAnswer('')} style={{ marginRight: '10px' }}>
+          Skip Question
+        </button>
+        <button onClick={handleSubmitAnswer} disabled={loading}>
+          {loading ? 'Submitting...' : 'Submit Answer'}
+        </button>
+      </div>
     </div>
   );
 }
@@ -608,14 +654,23 @@ export default function OnboardingFactsReview({
 ```typescript
 interface Props {
   completedCount: number;
+  totalBullets: number;
   onGoToDashboard: () => void;
 }
 
-export default function OnboardingComplete({ completedCount, onGoToDashboard }: Props) {
+export default function OnboardingComplete({ completedCount, totalBullets, onGoToDashboard }: Props) {
+  const skippedCount = totalBullets - completedCount;
+
   return (
     <div>
       <h1>✓ Onboarding Complete!</h1>
-      <p>You added context to {completedCount} bullets.</p>
+      <p>You added context to {completedCount} of {totalBullets} bullets.</p>
+      {skippedCount > 0 && (
+        <p style={{ color: '#666' }}>
+          {skippedCount} bullet{skippedCount > 1 ? 's' : ''} skipped.
+          You can add context to them later from Settings.
+        </p>
+      )}
       <p>You're ready to start applying for jobs!</p>
 
       <button onClick={onGoToDashboard}>
@@ -649,6 +704,22 @@ export default function OnboardingFlow() {
   const handleConversationComplete = (facts: any) => {
     setExtractedFacts(facts);
     setScreen('review');
+  };
+
+  const handleSkipBullet = () => {
+    // User skipped this bullet - move to next without saving facts
+    const nextIndex = currentBulletIndex + 1;
+
+    if (nextIndex < bullets.length) {
+      // More bullets to process
+      setCurrentBulletIndex(nextIndex);
+      setExtractedFacts(null);
+      setSessionId(null);
+      setScreen('conversation');
+    } else {
+      // All bullets done (some skipped, some completed)
+      setScreen('complete');
+    }
   };
 
   const handleFactsSaved = (bulletId: string) => {
@@ -688,6 +759,7 @@ export default function OnboardingFlow() {
           bulletIndex={currentBulletIndex}
           totalBullets={bullets.length}
           onComplete={handleConversationComplete}
+          onSkipBullet={handleSkipBullet}
         />
       )}
 
@@ -703,6 +775,7 @@ export default function OnboardingFlow() {
       {screen === 'complete' && (
         <OnboardingComplete
           completedCount={completedBulletIds.length}
+          totalBullets={bullets.length}
           onGoToDashboard={() => window.location.href = '/dashboard'}
         />
       )}

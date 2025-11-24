@@ -17,7 +17,8 @@ from llm_utils import (
     embed,
     extract_facts_from_qa,
     generate_bullet_with_facts,
-    generate_followup_questions
+    generate_followup_questions,
+    should_ask_more_questions
 )
 from db_utils import (
     store_user_bullet,
@@ -474,6 +475,303 @@ async def generate_resume_with_facts(
 
     except Exception as e:
         log.exception(f"Error generating with facts: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =====================================================================
+# ADD CONTEXT ENDPOINTS (Conversational AI)
+# =====================================================================
+
+class AddContextStartRequest(BaseModel):
+    user_id: str
+    bullet_text: str
+    bullet_id: Optional[str] = None  # If adding to existing bullet
+    job_description: Optional[str] = None  # Optional: helps generate better questions
+
+
+class AddContextStartResponse(BaseModel):
+    session_id: str
+    bullet_id: str
+    bullet_text: str
+    questions: List[Dict[str, str]]  # List of {"question": str, "type": str, "id": str}
+    message: str
+
+
+class AddContextAnswerRequest(BaseModel):
+    session_id: str
+    answers: List[Dict[str, str]]  # [{"qa_id": str, "answer": str}]
+
+
+class AddContextAnswerResponse(BaseModel):
+    status: str  # "continue" | "complete"
+    next_questions: Optional[List[Dict[str, str]]] = None
+    extracted_facts: Optional[Dict] = None
+    fact_id: Optional[str] = None
+    message: str
+
+
+@router.post("/context/start", response_model=AddContextStartResponse)
+async def start_add_context(request: AddContextStartRequest):
+    """
+    Start a conversational context-gathering session for a bullet.
+
+    User clicks "Add Context" on frontend → This endpoint is called.
+
+    Flow:
+    1. Creates a Q&A session for the bullet
+    2. Generates initial questions using AI
+    3. Returns questions for user to answer
+
+    Args:
+        user_id: User identifier
+        bullet_text: The bullet text to add context for
+        bullet_id: Optional existing bullet ID (if adding to existing)
+        job_description: Optional JD to help generate relevant questions
+
+    Returns:
+        Session ID, bullet ID, and initial questions
+    """
+    try:
+        user_id = request.user_id
+        bullet_text = request.bullet_text
+
+        # Create or get bullet
+        if request.bullet_id:
+            bullet_id = request.bullet_id
+            log.info(f"Adding context to existing bullet: {bullet_id}")
+        else:
+            # Create new bullet
+            embedding = embed(bullet_text)
+            bullet_id = store_user_bullet(user_id, bullet_text, embedding)
+            if not bullet_id:
+                raise HTTPException(status_code=500, detail="Failed to store bullet")
+            log.info(f"Created new bullet for context: {bullet_id}")
+
+        # Create Q&A session
+        session_id = create_qa_session(
+            user_id,
+            request.job_description or "",
+            [bullet_text]
+        )
+
+        if not session_id:
+            raise HTTPException(status_code=500, detail="Failed to create session")
+
+        # Get existing context (if any) to avoid duplicate questions
+        from db_utils import get_user_context
+        existing_context = get_user_context(user_id)
+
+        # Generate initial questions
+        questions = generate_followup_questions(
+            [bullet_text],
+            request.job_description or "",
+            existing_context,
+            max_questions=5  # Start with 5 questions
+        )
+
+        # Store questions in database
+        stored_questions = []
+        for q in questions:
+            qa_id = store_qa_pair(
+                session_id,
+                q["question"],
+                None,  # No answer yet
+                q.get("type"),
+                0  # bullet_index = 0 (single bullet)
+            )
+            stored_questions.append({
+                "question": q["question"],
+                "type": q.get("type", "general"),
+                "id": qa_id
+            })
+
+        return AddContextStartResponse(
+            session_id=session_id,
+            bullet_id=bullet_id,
+            bullet_text=bullet_text,
+            questions=stored_questions,
+            message=f"Generated {len(stored_questions)} questions. Answer as many as you'd like - you can skip any."
+        )
+
+    except Exception as e:
+        log.exception(f"Error starting context session: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/context/answer", response_model=AddContextAnswerResponse)
+async def submit_context_answers(request: AddContextAnswerRequest):
+    """
+    Submit answers to context questions. AI automatically decides if more questions needed.
+
+    This is called when user submits answers in the conversational UI.
+
+    Flow:
+    1. Store user's answers
+    2. LLM evaluates if enough context gathered (using should_ask_more_questions)
+    3. If YES (enough): Extract facts and return them
+    4. If NO (need more): Generate more questions and return them
+
+    Args:
+        session_id: The Q&A session ID
+        answers: List of {"qa_id": str, "answer": str}
+
+    Returns:
+        Either:
+        - status="continue" with next_questions
+        - status="complete" with extracted_facts
+    """
+    try:
+        session_id = request.session_id
+
+        # Store answers
+        for ans in request.answers:
+            if ans.get("answer") and ans.get("answer").strip():
+                from db_utils import update_qa_answer
+                update_qa_answer(ans["qa_id"], ans["answer"])
+
+        # Get session info
+        from db_utils import get_qa_session
+        session = get_qa_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        bullets = session.get("bullets", [])
+        job_description = session.get("job_description", "")
+
+        # Get all answered Q&A
+        answered_qa = get_answered_qa_pairs(session_id)
+
+        if not answered_qa:
+            return AddContextAnswerResponse(
+                status="continue",
+                next_questions=[],
+                message="No answers provided. Please answer at least one question."
+            )
+
+        # Ask LLM: Do we have enough context?
+        need_more, reason = should_ask_more_questions(
+            answered_qa,
+            bullets,
+            job_description
+        )
+
+        if not need_more:
+            # COMPLETE: Extract facts
+            log.info(f"Context gathering complete for session {session_id}: {reason}")
+
+            bullet_text = bullets[0] if bullets else ""
+
+            # Extract facts
+            facts = extract_facts_from_qa(bullet_text, answered_qa)
+
+            # Get bullet_id from session or answers
+            bullet_id = session.get("bullet_id")
+            if not bullet_id:
+                # Try to find it from user_id and bullet_text
+                from db_utils import check_exact_match
+                user_id = session.get("user_id")
+                bullet_id = check_exact_match(user_id, bullet_text)
+
+            # Store facts (unconfirmed - user will confirm on frontend)
+            fact_id = None
+            if bullet_id:
+                fact_id = store_bullet_facts(
+                    bullet_id,
+                    facts,
+                    qa_session_id=session_id,
+                    confirmed=False
+                )
+
+            # Store to user context for future
+            from db_utils import store_user_context
+            for qa in answered_qa:
+                store_user_context(session.get("user_id"), qa["question"], qa["answer"])
+
+            return AddContextAnswerResponse(
+                status="complete",
+                extracted_facts=facts,
+                fact_id=fact_id,
+                message=f"Great! I've gathered enough context. Review the extracted facts below."
+            )
+
+        else:
+            # CONTINUE: Generate more questions
+            log.info(f"Generating more questions for session {session_id}: {reason}")
+
+            # Generate follow-up questions
+            more_questions = generate_followup_questions(
+                bullets,
+                job_description,
+                answered_qa,
+                max_questions=3  # Just 3 more questions
+            )
+
+            # Store new questions
+            stored_questions = []
+            for q in more_questions:
+                qa_id = store_qa_pair(
+                    session_id,
+                    q["question"],
+                    None,
+                    q.get("type"),
+                    0
+                )
+                stored_questions.append({
+                    "question": q["question"],
+                    "type": q.get("type", "general"),
+                    "id": qa_id
+                })
+
+            return AddContextAnswerResponse(
+                status="continue",
+                next_questions=stored_questions,
+                message=f"Thanks! Just a few more questions to get the full picture. ({len(stored_questions)} questions)"
+            )
+
+    except Exception as e:
+        log.exception(f"Error submitting context answers: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/context/confirm_facts")
+async def confirm_context_facts(
+    fact_id: str = Form(...),
+    edited_facts: Optional[str] = Form(None)  # JSON string if user edited
+):
+    """
+    User confirms/edits the extracted facts.
+
+    Called after user reviews facts in the UI.
+
+    Args:
+        fact_id: The fact ID from extract step
+        edited_facts: Optional JSON string if user edited the facts
+
+    Returns:
+        Confirmation message
+    """
+    try:
+        # If user edited, update first
+        if edited_facts:
+            import json
+            facts = json.loads(edited_facts)
+            success = update_bullet_facts(fact_id, facts)
+            if not success:
+                raise HTTPException(status_code=500, detail="Failed to update facts")
+
+        # Confirm facts
+        confirmed = confirm_bullet_facts(fact_id)
+        if not confirmed:
+            raise HTTPException(status_code=500, detail="Failed to confirm facts")
+
+        return {
+            "status": "success",
+            "message": "Facts confirmed! These will be used for future resumes.",
+            "fact_id": fact_id
+        }
+
+    except Exception as e:
+        log.exception(f"Error confirming facts: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

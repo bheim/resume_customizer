@@ -76,10 +76,18 @@ async def upload(file: UploadFile = File(...), user_id: str = Form(...)):
         return JSONResponse({"error": "bad_docx", "detail": str(e)}, status_code=400)
 
     bullets, paras = collect_word_numbered_bullets(doc)
+
+    # Log all paragraphs for debugging
+    log.info(f"Document has {len(doc.paragraphs)} paragraphs total")
+    for i, p in enumerate(doc.paragraphs[:10]):  # Log first 10 paragraphs
+        log.info(f"Para {i}: '{p.text[:100]}'")
+
     if not bullets:
-        return JSONResponse({"error": "no_bullets_found"}, status_code=422)
+        log.warning("No bullets found using Word numbering or bullet chars: •·-–—◦●*")
+        return JSONResponse({"error": "no_bullets_found", "detail": "Resume must use numbered lists or bullet points (•·-–—◦●*)"}, status_code=422)
 
     log.info(f"Extracted {len(bullets)} bullets for user {user_id}")
+    log.info(f"Sample bullets: {[b[:60] for b in bullets[:3]]}")
 
     return JSONResponse({
         "bullets": bullets,

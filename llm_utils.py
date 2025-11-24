@@ -395,3 +395,279 @@ Return ONLY a JSON array of {n} rewritten bullets like: ["...", "..."]"""
 
     log.info(f"OpenAI response lines with context: {len(lines)}")
     return lines
+
+
+def extract_facts_from_qa(bullet_text: str, qa_pairs: List[Dict[str, str]]) -> Dict:
+    """
+    Extract structured facts from Q&A conversation for a single bullet.
+
+    This function converts raw Q&A pairs into a structured format that can be:
+    1. Shown to the user for confirmation/editing
+    2. Stored in the database for future use
+    3. Used to generate tailored bullets without re-asking questions
+
+    Args:
+        bullet_text: The original bullet text
+        qa_pairs: List of {"question": str, "answer": str} dictionaries
+
+    Returns:
+        Structured facts following BulletFacts schema:
+        {
+            "metrics": {
+                "quantifiable_achievements": [...],
+                "scale": [...]
+            },
+            "technical_details": {
+                "technologies": [...],
+                "methodologies": [...]
+            },
+            "impact": {
+                "business_outcomes": [...],
+                "stakeholder_value": [...]
+            },
+            "context": {
+                "challenges_solved": [...],
+                "scope": [...],
+                "role": [...]
+            },
+            "raw_qa": [...]  # Original Q&A preserved
+        }
+    """
+    if not client:
+        raise RuntimeError("OPENAI_API_KEY missing")
+
+    # Build Q&A text
+    qa_text = ""
+    for qa in qa_pairs:
+        qa_text += f"Q: {qa['question']}\nA: {qa['answer']}\n\n"
+
+    prompt = f"""You are extracting structured facts from a Q&A conversation about a resume bullet.
+
+ORIGINAL BULLET:
+{bullet_text}
+
+Q&A CONVERSATION:
+{qa_text}
+
+Extract and organize the facts from this conversation into structured categories. Be comprehensive but accurate - only include information that was explicitly stated in the answers.
+
+Return STRICT JSON with this exact structure:
+
+{{
+  "metrics": {{
+    "quantifiable_achievements": ["Achievement with number/percentage", "Another metric"],
+    "scale": ["Team size", "Volume/scale numbers", "Timeline/duration"]
+  }},
+  "technical_details": {{
+    "technologies": ["Specific tools", "Languages", "Frameworks", "Platforms"],
+    "methodologies": ["Agile", "CI/CD", "Specific processes"]
+  }},
+  "impact": {{
+    "business_outcomes": ["Revenue impact", "Efficiency gains", "User metrics"],
+    "stakeholder_value": ["How it helped specific teams/users", "Business value"]
+  }},
+  "context": {{
+    "challenges_solved": ["Specific problems addressed"],
+    "scope": ["Project timeline", "Team structure", "Organizational scope"],
+    "role": ["Specific contributions", "Leadership aspects", "Responsibilities"]
+  }}
+}}
+
+IMPORTANT:
+- Only include facts that are clearly stated in the answers
+- Use exact numbers/percentages when provided
+- Keep each item concise (1-2 sentences max)
+- If a category has no information, use an empty array
+- Do NOT include the raw Q&A in this structure (that will be added separately)
+- Return ONLY valid JSON, no commentary or code fences"""
+
+    r = client.chat.completions.create(
+        model=CHAT_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0
+    )
+
+    raw = (r.choices[0].message.content or "").strip()
+
+    # Parse JSON response
+    try:
+        # Clean potential code fences
+        if raw.startswith("```"):
+            raw = raw.strip("`")
+            raw = re.sub(r"^\s*json", "", raw, flags=re.I).strip()
+
+        facts = loads(raw)
+
+        # Validate structure
+        expected_keys = {
+            "metrics": ["quantifiable_achievements", "scale"],
+            "technical_details": ["technologies", "methodologies"],
+            "impact": ["business_outcomes", "stakeholder_value"],
+            "context": ["challenges_solved", "scope", "role"]
+        }
+
+        for category, subkeys in expected_keys.items():
+            if category not in facts:
+                facts[category] = {}
+            for subkey in subkeys:
+                if subkey not in facts[category]:
+                    facts[category][subkey] = []
+
+        # Add raw Q&A for reference
+        facts["raw_qa"] = qa_pairs
+
+        log.info(f"Extracted facts for bullet: {len(qa_pairs)} Q&A pairs")
+        return facts
+
+    except Exception as e:
+        log.exception(f"Failed to parse facts JSON: {e}")
+        # Return minimal structure with raw Q&A
+        return {
+            "metrics": {"quantifiable_achievements": [], "scale": []},
+            "technical_details": {"technologies": [], "methodologies": []},
+            "impact": {"business_outcomes": [], "stakeholder_value": []},
+            "context": {"challenges_solved": [], "scope": [], "role": []},
+            "raw_qa": qa_pairs
+        }
+
+
+def generate_bullet_with_facts(original_bullet: str, job_description: str,
+                               stored_facts: Dict, char_limit: Optional[int] = None) -> str:
+    """
+    Generate enhanced bullet using stored facts instead of raw Q&A.
+
+    This is the optimized generation flow that uses pre-extracted, user-confirmed facts.
+
+    Args:
+        original_bullet: The original bullet text
+        job_description: Target job description
+        stored_facts: Structured facts from extract_facts_from_qa()
+        char_limit: Optional character limit for the bullet
+
+    Returns:
+        Enhanced bullet string
+    """
+    if not client:
+        raise RuntimeError("OPENAI_API_KEY missing")
+
+    # Build facts context
+    facts_text = ""
+
+    # Metrics
+    if stored_facts.get("metrics"):
+        metrics = stored_facts["metrics"]
+        if metrics.get("quantifiable_achievements"):
+            facts_text += "Quantifiable Achievements:\n"
+            for item in metrics["quantifiable_achievements"]:
+                facts_text += f"• {item}\n"
+        if metrics.get("scale"):
+            facts_text += "Scale/Scope:\n"
+            for item in metrics["scale"]:
+                facts_text += f"• {item}\n"
+
+    # Technical details
+    if stored_facts.get("technical_details"):
+        tech = stored_facts["technical_details"]
+        if tech.get("technologies"):
+            facts_text += f"Technologies: {', '.join(tech['technologies'])}\n"
+        if tech.get("methodologies"):
+            facts_text += f"Methodologies: {', '.join(tech['methodologies'])}\n"
+
+    # Impact
+    if stored_facts.get("impact"):
+        impact = stored_facts["impact"]
+        if impact.get("business_outcomes"):
+            facts_text += "Business Impact:\n"
+            for item in impact["business_outcomes"]:
+                facts_text += f"• {item}\n"
+        if impact.get("stakeholder_value"):
+            facts_text += "Stakeholder Value:\n"
+            for item in impact["stakeholder_value"]:
+                facts_text += f"• {item}\n"
+
+    # Context
+    if stored_facts.get("context"):
+        context = stored_facts["context"]
+        if context.get("challenges_solved"):
+            facts_text += "Challenges Solved:\n"
+            for item in context["challenges_solved"]:
+                facts_text += f"• {item}\n"
+        if context.get("scope"):
+            facts_text += "Project Scope:\n"
+            for item in context["scope"]:
+                facts_text += f"• {item}\n"
+        if context.get("role"):
+            facts_text += "Your Role:\n"
+            for item in context["role"]:
+                facts_text += f"• {item}\n"
+
+    char_limit_text = f"\nIMPORTANT: Keep the bullet under {char_limit} characters." if char_limit else ""
+
+    prompt = f"""You are a professional resume writer. Rewrite this bullet using the provided facts and tailoring it to the job description.
+
+ORIGINAL BULLET:
+{original_bullet}
+
+TARGET JOB DESCRIPTION:
+{job_description}
+
+VERIFIED FACTS ABOUT THIS EXPERIENCE:
+{facts_text}
+
+REWRITING GUIDELINES:
+• Use the Google XYZ formula: Accomplished [X] as measured by [Y] by doing [Z]
+• Incorporate specific metrics and achievements from the facts
+• Align with the job description's requirements and terminology
+• Preserve ownership language and demonstrate impact
+• Keep it concise and powerful
+• DO NOT add information not present in the facts{char_limit_text}
+
+Return ONLY the rewritten bullet, no commentary or explanation."""
+
+    r = client.chat.completions.create(
+        model=CHAT_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0
+    )
+
+    enhanced_bullet = (r.choices[0].message.content or "").strip()
+
+    # Clean up any bullet markers or extra formatting
+    enhanced_bullet = enhanced_bullet.lstrip("-• ").strip()
+
+    log.info(f"Generated bullet with facts: {len(enhanced_bullet)} chars")
+    return enhanced_bullet
+
+
+def generate_bullets_with_facts(bullets: List[str], job_description: str,
+                                bullet_facts_map: Dict[int, Dict]) -> List[str]:
+    """
+    Generate enhanced bullets for multiple bullets using stored facts.
+
+    Args:
+        bullets: List of original bullets
+        job_description: Target job description
+        bullet_facts_map: Dictionary mapping bullet index to stored facts
+                         {0: facts_dict, 1: facts_dict, ...}
+
+    Returns:
+        List of enhanced bullets (same length as input)
+    """
+    if not client:
+        raise RuntimeError("OPENAI_API_KEY missing")
+
+    enhanced_bullets = []
+
+    for idx, bullet in enumerate(bullets):
+        if idx in bullet_facts_map and bullet_facts_map[idx]:
+            # Use facts-based generation
+            log.info(f"Generating bullet {idx+1} with stored facts")
+            enhanced = generate_bullet_with_facts(bullet, job_description, bullet_facts_map[idx])
+            enhanced_bullets.append(enhanced)
+        else:
+            # Fallback to basic rewriting (no facts available)
+            log.info(f"Generating bullet {idx+1} without facts (fallback to basic rewrite)")
+            # Use single-bullet rewrite (we'll create a simple version)
+            enhanced_bullets.append(bullet)  # Placeholder - can improve with basic rewrite logic
+
+    return enhanced_bullets

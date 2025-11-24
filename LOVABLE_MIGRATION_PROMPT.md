@@ -4,14 +4,17 @@
 
 ## Context
 
-I have an existing resume optimizer app built with Lovable that currently works with a Q&A-based backend. The backend has been completely refactored to use:
+I have an existing resume optimizer app built with Lovable that currently works with a Q&A-based backend.
 
-1. **Persistent bullet storage** with semantic matching
-2. **Conversational AI** instead of formal Q&A
-3. **Fact-based bullet generation** with XYZ format
-4. **Job description keyword extraction**
+**IMPORTANT:** The backend API and Supabase database are **already implemented and running**. I only need you to update the **frontend React components** to call the new API endpoints.
 
-I need you to update the frontend to work with the new backend API while preserving the existing UX where appropriate.
+The new backend provides:
+1. **Persistent bullet storage** with semantic matching (already in Supabase)
+2. **Conversational AI** instead of formal Q&A (backend handles this)
+3. **Fact-based bullet generation** with XYZ format (backend handles this)
+4. **Job description keyword extraction** (backend handles this)
+
+**Your job:** Update the frontend UI to work with these existing backend endpoints.
 
 ---
 
@@ -36,7 +39,9 @@ I need you to update the frontend to work with the new backend API while preserv
 
 ### Backend API Endpoints
 
-All endpoints are under `/v2/` prefix on the backend API.
+**These endpoints already exist on my backend server. DO NOT create or implement these - just call them from the frontend.**
+
+All endpoints are under `/v2/` prefix. Base URL: `${API_BASE_URL}/v2/...`
 
 #### **Add Context Flow** (Conversational)
 
@@ -558,14 +563,31 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 ## Summary for Lovable
 
-Please update my resume optimizer frontend to support the new conversational backend API. The key changes are:
+**What You Should Do:**
+✅ Create React components for the new UI (dialogs, buttons, displays)
+✅ Make API calls to the existing `/v2/` endpoints
+✅ Handle loading states, errors, and user interactions
+✅ Style the components to match my existing design
+✅ Keep the old upload/download flow working
 
-1. Add "Add Context" button on each bullet that opens a conversational dialog
-2. Dialog shows 1-2 questions at a time, AI auto-stops when enough context
-3. Show extracted facts for user review/confirmation
-4. Display bullet matching status when uploading resume for job
-5. Use stored facts automatically for matched bullets
+**What You Should NOT Do:**
+❌ Don't create any backend API endpoints (they already exist)
+❌ Don't set up Supabase (already configured)
+❌ Don't implement the AI logic (backend handles it)
+❌ Don't create database schemas (already migrated)
+
+---
+
+## The Changes Needed
+
+Please update my resume optimizer frontend to support the new conversational backend API:
+
+1. **Add "Add Context" button** on each bullet that opens a conversational dialog
+2. **Conversational dialog** shows 1-2 questions at a time, AI auto-stops when enough context
+3. **Facts review component** to show extracted facts for user confirmation
+4. **Bullet matching display** when uploading resume for job application
+5. **Auto-use stored facts** for matched bullets
 
 Keep the existing upload/download flow working, but add these new features alongside. Make the UX feel conversational and friendly, not formal Q&A.
 
-API endpoints are all under `/v2/` and documented above. Let me know if you need clarification on any endpoint or component!
+All API endpoints are documented above under "Backend API Endpoints" - just make HTTP calls to them from your React components!

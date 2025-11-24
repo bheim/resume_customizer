@@ -13,6 +13,14 @@ from db_utils import (create_qa_session, get_qa_session, store_qa_pair, update_q
                       get_session_qa_pairs, get_user_context, store_user_context,
                       update_session_status, get_answered_qa_pairs)
 
+# Import new v2 endpoints
+try:
+    from api_endpoints_new import router as v2_router
+    v2_endpoints_available = True
+except Exception as e:
+    log.warning(f"Could not import v2 endpoints: {e}")
+    v2_endpoints_available = False
+
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -22,6 +30,11 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["X-Score-Before", "X-Score-After", "X-Score-Delta", "X-QA-Context-Used", "X-Session-Id"]
 )
+
+# Include v2 router if available
+if v2_endpoints_available:
+    app.include_router(v2_router)
+    log.info("✓ V2 endpoints registered")
 
 
 # Pydantic models for Q&A endpoints
@@ -34,6 +47,45 @@ class AnswerSubmission(BaseModel):
 @app.get("/")
 def root():
     return health()
+
+
+@app.post("/upload")
+async def upload(file: UploadFile = File(...), user_id: str = Form(...)):
+    """
+    Upload resume and extract bullets.
+    Simple endpoint that returns just the bullets from the resume.
+    """
+    # Read and validate file
+    raw = await file.read()
+    size = len(raw)
+    ct = file.content_type
+    log.info(f"/upload recv file='{file.filename}' size={size} user_id={user_id}")
+
+    if not raw or size < 512:
+        return JSONResponse({"error": "empty_or_small_file"}, status_code=400)
+
+    if ct not in {"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                  "application/octet-stream", "application/msword"}:
+        return JSONResponse({"error": "bad_content_type", "got": ct}, status_code=415)
+
+    # Parse DOCX
+    try:
+        doc = load_docx(raw)
+    except Exception as e:
+        log.exception("bad_docx")
+        return JSONResponse({"error": "bad_docx", "detail": str(e)}, status_code=400)
+
+    bullets, paras = collect_word_numbered_bullets(doc)
+    if not bullets:
+        return JSONResponse({"error": "no_bullets_found"}, status_code=422)
+
+    log.info(f"Extracted {len(bullets)} bullets for user {user_id}")
+
+    return JSONResponse({
+        "bullets": bullets,
+        "message": f"Successfully extracted {len(bullets)} bullets"
+    })
+
 
 @app.post("/rewrite")
 async def rewrite(file: UploadFile = File(...), job_description: str = Form(...), max_chars_override: Optional[int] = Form(None)):

@@ -49,6 +49,145 @@ def root():
     return health()
 
 
+@app.post("/v2/context/start")
+async def v2_context_start(user_id: str = Body(...), bullet_text: str = Body(...)):
+    """
+    Simpler conversational context endpoint matching Lovable's expectations.
+    Returns a single initial question.
+    """
+    from llm_utils import generate_conversational_question
+
+    log.info(f"/v2/context/start called: user_id={user_id}, bullet_text={bullet_text[:100]}")
+
+    try:
+        # Create session
+        session_id = create_qa_session(user_id, "", [bullet_text])
+        if not session_id:
+            return JSONResponse({"error": "failed_to_create_session"}, status_code=500)
+
+        # Generate first question
+        initial_question = generate_conversational_question(bullet_text)
+
+        log.info(f"Generated initial question for session {session_id}: {initial_question[:100]}")
+
+        return JSONResponse({
+            "session_id": session_id,
+            "initial_question": initial_question,
+            "message": "Session started. Answer the question or skip."
+        })
+
+    except Exception as e:
+        log.exception(f"Error in /v2/context/start: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/v2/context/answer")
+async def v2_context_answer(session_id: str = Body(...), user_answer: str = Body(...)):
+    """
+    Simpler answer submission endpoint matching Lovable's expectations.
+    Takes a single answer, returns either next question or extracted facts.
+    """
+    log.info(f"/v2/context/answer called: session_id={session_id}, answer_length={len(user_answer)}")
+    log.info(f"Answer content: {user_answer[:200]}")
+
+    try:
+        # Get session
+        session = get_qa_session(session_id)
+        if not session:
+            return JSONResponse({"error": "session_not_found"}, status_code=404)
+
+        bullets = session.get("bullets", [])
+        bullet_text = bullets[0] if bullets else ""
+
+        # Store this answer (create a new Q&A pair for it)
+        qa_id = store_qa_pair(session_id, "Question", user_answer, "conversational", 0)
+
+        # Get all answers so far
+        answered_qa = get_answered_qa_pairs(session_id)
+        log.info(f"Total answers collected: {len(answered_qa)}")
+
+        # Check if we have enough context
+        from llm_utils import should_ask_more_questions, extract_facts_from_conversation
+
+        # Build conversation history
+        conversation_history = "\n\n".join([
+            f"Q: {qa['question']}\nA: {qa['answer']}"
+            for qa in answered_qa
+        ])
+
+        need_more, reason = should_ask_more_questions(answered_qa, bullets, "")
+        log.info(f"Need more questions: {need_more}, reason: {reason}")
+
+        if not need_more or len(answered_qa) >= 5:  # Max 5 questions
+            # Extract facts from conversation
+            log.info("Extracting facts from conversation")
+            facts = extract_facts_from_conversation(bullet_text, conversation_history)
+
+            return JSONResponse({
+                "status": "complete",
+                "extracted_facts": facts,
+                "message": "Context gathering complete!"
+            })
+        else:
+            # Generate next question
+            from llm_utils import generate_conversational_question
+            next_question = generate_conversational_question(bullet_text)
+
+            return JSONResponse({
+                "status": "continue",
+                "next_question": next_question,
+                "conversation_so_far": conversation_history
+            })
+
+    except Exception as e:
+        log.exception(f"Error in /v2/context/answer: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/v2/context/confirm_facts")
+async def v2_confirm_facts(
+    session_id: str = Body(...),
+    facts: dict = Body(...),
+    user_confirmed: bool = Body(True)
+):
+    """
+    Save confirmed facts for a bullet.
+    """
+    log.info(f"/v2/context/confirm_facts called: session_id={session_id}")
+
+    try:
+        # Get session to find bullet info
+        session = get_qa_session(session_id)
+        if not session:
+            return JSONResponse({"error": "session_not_found"}, status_code=404)
+
+        user_id = session.get("user_id")
+        bullets = session.get("bullets", [])
+        bullet_text = bullets[0] if bullets else ""
+
+        # Store bullet with facts
+        from llm_utils import embed
+        from db_utils import store_user_bullet, store_bullet_facts
+
+        embedding = embed(bullet_text)
+        bullet_id = store_user_bullet(user_id, bullet_text, embedding)
+
+        if bullet_id:
+            fact_id = store_bullet_facts(bullet_id, facts, session_id, user_confirmed)
+            log.info(f"Stored facts for bullet {bullet_id}, fact_id={fact_id}")
+
+            return JSONResponse({
+                "bullet_id": bullet_id,
+                "message": "Facts saved successfully"
+            })
+        else:
+            return JSONResponse({"error": "failed_to_store_bullet"}, status_code=500)
+
+    except Exception as e:
+        log.exception(f"Error in /v2/context/confirm_facts: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @app.post("/upload")
 async def upload(file: UploadFile = File(...), user_id: str = Form(...)):
     """

@@ -531,6 +531,9 @@ async def start_add_context(request: AddContextStartRequest):
     Returns:
         Session ID, bullet ID, and initial questions
     """
+    log.info(f"=== /v2/context/start called ===")
+    log.info(f"Request data: user_id={request.user_id}, bullet_text={request.bullet_text[:100] if request.bullet_text else 'None'}, bullet_id={request.bullet_id}, job_description={request.job_description[:100] if request.job_description else 'None'}")
+
     try:
         user_id = request.user_id
         bullet_text = request.bullet_text
@@ -620,6 +623,10 @@ async def submit_context_answers(request: AddContextAnswerRequest):
         - status="continue" with next_questions
         - status="complete" with extracted_facts
     """
+    log.info(f"=== /v2/context/answer called ===")
+    log.info(f"Request data: session_id={request.session_id}, answers_count={len(request.answers)}")
+    log.info(f"Answers: {request.answers}")
+
     try:
         session_id = request.session_id
 

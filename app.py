@@ -44,29 +44,46 @@ class AnswerSubmission(BaseModel):
     user_id: Optional[str] = None
 
 
+# Pydantic models for v2 context endpoints
+class ContextStartRequest(BaseModel):
+    user_id: str
+    bullet_text: str
+
+
+class ContextAnswerRequest(BaseModel):
+    session_id: str
+    user_answer: str
+
+
+class ConfirmFactsRequest(BaseModel):
+    session_id: str
+    facts: dict
+    user_confirmed: bool = True
+
+
 @app.get("/")
 def root():
     return health()
 
 
 @app.post("/v2/context/start")
-async def v2_context_start(user_id: str = Body(...), bullet_text: str = Body(...)):
+async def v2_context_start(request: ContextStartRequest):
     """
     Simpler conversational context endpoint matching Lovable's expectations.
     Returns a single initial question.
     """
     from llm_utils import generate_conversational_question
 
-    log.info(f"/v2/context/start called: user_id={user_id}, bullet_text={bullet_text[:100]}")
+    log.info(f"/v2/context/start called: user_id={request.user_id}, bullet_text={request.bullet_text[:100]}")
 
     try:
         # Create session
-        session_id = create_qa_session(user_id, "", [bullet_text])
+        session_id = create_qa_session(request.user_id, "", [request.bullet_text])
         if not session_id:
             return JSONResponse({"error": "failed_to_create_session"}, status_code=500)
 
         # Generate first question
-        initial_question = generate_conversational_question(bullet_text)
+        initial_question = generate_conversational_question(request.bullet_text)
 
         log.info(f"Generated initial question for session {session_id}: {initial_question[:100]}")
 
@@ -82,17 +99,17 @@ async def v2_context_start(user_id: str = Body(...), bullet_text: str = Body(...
 
 
 @app.post("/v2/context/answer")
-async def v2_context_answer(session_id: str = Body(...), user_answer: str = Body(...)):
+async def v2_context_answer(request: ContextAnswerRequest):
     """
     Simpler answer submission endpoint matching Lovable's expectations.
     Takes a single answer, returns either next question or extracted facts.
     """
-    log.info(f"/v2/context/answer called: session_id={session_id}, answer_length={len(user_answer)}")
-    log.info(f"Answer content: {user_answer[:200]}")
+    log.info(f"/v2/context/answer called: session_id={request.session_id}, answer_length={len(request.user_answer)}")
+    log.info(f"Answer content: {request.user_answer[:200]}")
 
     try:
         # Get session
-        session = get_qa_session(session_id)
+        session = get_qa_session(request.session_id)
         if not session:
             return JSONResponse({"error": "session_not_found"}, status_code=404)
 
@@ -100,10 +117,10 @@ async def v2_context_answer(session_id: str = Body(...), user_answer: str = Body
         bullet_text = bullets[0] if bullets else ""
 
         # Store this answer (create a new Q&A pair for it)
-        qa_id = store_qa_pair(session_id, "Question", user_answer, "conversational", 0)
+        qa_id = store_qa_pair(request.session_id, "Question", request.user_answer, "conversational", 0)
 
         # Get all answers so far
-        answered_qa = get_answered_qa_pairs(session_id)
+        answered_qa = get_answered_qa_pairs(request.session_id)
         log.info(f"Total answers collected: {len(answered_qa)}")
 
         # Check if we have enough context
@@ -145,19 +162,15 @@ async def v2_context_answer(session_id: str = Body(...), user_answer: str = Body
 
 
 @app.post("/v2/context/confirm_facts")
-async def v2_confirm_facts(
-    session_id: str = Body(...),
-    facts: dict = Body(...),
-    user_confirmed: bool = Body(True)
-):
+async def v2_confirm_facts(request: ConfirmFactsRequest):
     """
     Save confirmed facts for a bullet.
     """
-    log.info(f"/v2/context/confirm_facts called: session_id={session_id}")
+    log.info(f"/v2/context/confirm_facts called: session_id={request.session_id}")
 
     try:
         # Get session to find bullet info
-        session = get_qa_session(session_id)
+        session = get_qa_session(request.session_id)
         if not session:
             return JSONResponse({"error": "session_not_found"}, status_code=404)
 
@@ -173,7 +186,7 @@ async def v2_confirm_facts(
         bullet_id = store_user_bullet(user_id, bullet_text, embedding)
 
         if bullet_id:
-            fact_id = store_bullet_facts(bullet_id, facts, session_id, user_confirmed)
+            fact_id = store_bullet_facts(bullet_id, request.facts, request.session_id, request.user_confirmed)
             log.info(f"Stored facts for bullet {bullet_id}, fact_id={fact_id}")
 
             return JSONResponse({

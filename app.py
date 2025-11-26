@@ -202,6 +202,63 @@ async def v2_confirm_facts(request: ConfirmFactsRequest):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@app.get("/v2/bullets/{user_id}")
+async def get_user_bullets(user_id: str):
+    """
+    Get all bullets for a user with their associated facts.
+    Returns bullets with facts for the "My Bullets" page.
+    """
+    log.info(f"/v2/bullets/{user_id} called")
+
+    try:
+        from db_utils import get_bullet_facts
+
+        # Query user_bullets table
+        if not supabase:
+            return JSONResponse({"error": "supabase_not_configured"}, status_code=503)
+
+        # Get all bullets for this user
+        result = supabase.table('user_bullets').select(
+            'id, bullet_text, created_at, updated_at, source_resume_name'
+        ).eq('user_id', user_id).order('created_at', desc=True).execute()
+
+        bullets_data = []
+        for bullet in result.data:
+            bullet_id = bullet['id']
+
+            # Get facts for this bullet
+            facts_list = get_bullet_facts(bullet_id, confirmed_only=False)
+
+            # Get the most recent facts
+            latest_facts = None
+            has_confirmed_facts = False
+            if facts_list:
+                latest_facts = facts_list[0].get('facts')
+                has_confirmed_facts = facts_list[0].get('confirmed_by_user', False)
+
+            bullets_data.append({
+                "bullet_id": bullet_id,
+                "bullet_text": bullet['bullet_text'],
+                "has_facts": latest_facts is not None,
+                "has_confirmed_facts": has_confirmed_facts,
+                "facts": latest_facts,
+                "created_at": bullet['created_at'],
+                "updated_at": bullet['updated_at'],
+                "source_resume": bullet.get('source_resume_name')
+            })
+
+        log.info(f"Found {len(bullets_data)} bullets for user {user_id}")
+
+        return JSONResponse({
+            "bullets": bullets_data,
+            "count": len(bullets_data)
+        })
+
+    except Exception as e:
+        log.exception(f"Error getting user bullets: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @app.post("/upload")
 async def upload(file: UploadFile = File(...), user_id: str = Form(...)):
     """

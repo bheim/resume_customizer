@@ -32,9 +32,10 @@ app.add_middleware(
 )
 
 # Include v2 router if available
-if v2_endpoints_available:
-    app.include_router(v2_router)
-    log.info("✓ V2 endpoints registered")
+# DISABLED: Using simpler v2 endpoints defined below instead
+# if v2_endpoints_available:
+#     app.include_router(v2_router)
+#     log.info("✓ V2 endpoints registered")
 
 
 # Pydantic models for Q&A endpoints

@@ -327,11 +327,14 @@ async def upload_base_resume(
             log.exception("Invalid DOCX file")
             raise HTTPException(status_code=400, detail=f"Invalid DOCX file: {str(e)}")
 
+        # Encode file content as base64 for storage
+        file_content_b64 = base64.b64encode(file_content).decode('utf-8')
+
         # Store in database (upsert)
         data = {
             "user_id": user_id,
             "file_name": file_name,
-            "file_data": file_content,
+            "file_data": file_content_b64,
             "updated_at": "now()"
         }
 
@@ -454,10 +457,13 @@ async def match_bullets_for_job(
                 raise HTTPException(status_code=503, detail="Supabase not configured")
 
             try:
+                # Encode as base64 for storage
+                content_b64 = base64.b64encode(content).decode('utf-8')
+
                 supabase.table("job_application_sessions").insert({
                     "user_id": user_id,
                     "session_id": session_id,
-                    "resume_data": content,
+                    "resume_data": content_b64,
                     "resume_name": resume_name
                 }).execute()
                 log.info(f"Stored session resume for session {session_id}")
@@ -477,7 +483,9 @@ async def match_bullets_for_job(
                     detail="No resume file provided and no base resume found. Please upload a resume or set a base resume."
                 )
 
-            content = result.data[0]["file_data"]
+            # Decode from base64
+            content_b64 = result.data[0]["file_data"]
+            content = base64.b64decode(content_b64)
             log.info("Loaded base resume from database")
 
         # Extract bullets from resume
@@ -685,7 +693,8 @@ async def download_resume(
             ).eq("session_id", session_id).execute()
 
             if result.data and len(result.data) > 0:
-                raw = result.data[0]["resume_data"]
+                # Decode from base64
+                raw = base64.b64decode(result.data[0]["resume_data"])
                 file_name = result.data[0]["resume_name"]
                 log.info(f"Loaded session resume: {file_name}")
             else:
@@ -701,7 +710,8 @@ async def download_resume(
                         detail="Session resume not found and no base resume exists. Please upload a resume."
                     )
 
-                raw = result.data[0]["file_data"]
+                # Decode from base64
+                raw = base64.b64decode(result.data[0]["file_data"])
                 file_name = result.data[0]["file_name"]
                 log.info(f"Loaded base resume: {file_name}")
         else:
@@ -719,7 +729,8 @@ async def download_resume(
                     detail="No resume file, session, or base resume found. Please upload a resume."
                 )
 
-            raw = result.data[0]["file_data"]
+            # Decode from base64
+            raw = base64.b64decode(result.data[0]["file_data"])
             file_name = result.data[0]["file_name"]
             log.info(f"Loaded base resume: {file_name}")
 

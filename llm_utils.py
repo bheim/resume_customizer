@@ -615,7 +615,8 @@ VERIFIED FACTS ABOUT THIS EXPERIENCE:
 {facts_text}
 
 REWRITING GUIDELINES:
-• Use the Google XYZ formula: Accomplished [X] as measured by [Y] by doing [Z]
+• Use the Google XYZ formula: [Action verb] [X] as measured by [Y] by doing [Z]
+• Start with strong, impactful action verbs (e.g., Led, Developed, Improved, Reduced, Increased, Delivered, Built, Designed, Implemented - this list is not comprehensive, choose the verb that best fits)
 • Incorporate specific metrics and achievements from the facts
 • Align with the job description's requirements and terminology
 • Preserve ownership language and demonstrate impact

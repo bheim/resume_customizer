@@ -26,7 +26,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["POST", "GET", "OPTIONS"],
+    allow_methods=["POST", "GET", "OPTIONS", "DELETE"],
     allow_headers=["*"],
     expose_headers=["X-Score-Before", "X-Score-After", "X-Score-Delta", "X-QA-Context-Used", "X-Session-Id"]
 )
@@ -83,6 +83,19 @@ class EnhancedBulletItem(BaseModel):
 
 class BulletGenerationResponse(BaseModel):
     enhanced_bullets: List[EnhancedBulletItem]
+
+
+# Pydantic models for base resume endpoints
+class BaseResumeUploadResponse(BaseModel):
+    success: bool
+    file_name: str
+    message: str
+
+
+class BaseResumeInfoResponse(BaseModel):
+    has_resume: bool
+    file_name: Optional[str] = None
+    uploaded_at: Optional[str] = None
 
 
 @app.get("/")
@@ -282,14 +295,140 @@ async def get_user_bullets(user_id: str):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+# =====================================================================
+# BASE RESUME ENDPOINTS
+# =====================================================================
+
+@app.post("/v2/user/base_resume")
+async def upload_base_resume(
+    user_id: str = Form(...),
+    file: UploadFile = File(...)
+):
+    """
+    Upload and store a base resume for the user.
+    This resume can be reused across multiple job applications.
+    """
+    log.info(f"/v2/user/base_resume POST called for user {user_id}")
+
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Supabase not configured")
+
+    try:
+        # Read file
+        file_content = await file.read()
+        file_name = file.filename or "base_resume.docx"
+
+        # Validate it's a valid DOCX
+        try:
+            doc = load_docx(file_content)
+            bullets, _ = collect_word_numbered_bullets(doc)
+            log.info(f"Validated DOCX with {len(bullets)} bullets")
+        except Exception as e:
+            log.exception("Invalid DOCX file")
+            raise HTTPException(status_code=400, detail=f"Invalid DOCX file: {str(e)}")
+
+        # Store in database (upsert)
+        data = {
+            "user_id": user_id,
+            "file_name": file_name,
+            "file_data": file_content,
+            "updated_at": "now()"
+        }
+
+        result = supabase.table("user_base_resumes").upsert(
+            data,
+            on_conflict="user_id"
+        ).execute()
+
+        log.info(f"Stored base resume for user {user_id}: {file_name}")
+
+        return {
+            "success": True,
+            "file_name": file_name,
+            "message": "Base resume uploaded successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception(f"Error uploading base resume: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/v2/user/base_resume/{user_id}")
+async def get_base_resume_info(user_id: str):
+    """
+    Get information about the user's base resume (if it exists).
+    Returns metadata only, not the actual file.
+    """
+    log.info(f"/v2/user/base_resume GET called for user {user_id}")
+
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Supabase not configured")
+
+    try:
+        result = supabase.table("user_base_resumes").select(
+            "file_name, uploaded_at, updated_at"
+        ).eq("user_id", user_id).execute()
+
+        if result.data and len(result.data) > 0:
+            resume = result.data[0]
+            return {
+                "has_resume": True,
+                "file_name": resume["file_name"],
+                "uploaded_at": resume.get("updated_at") or resume.get("uploaded_at")
+            }
+        else:
+            return {
+                "has_resume": False
+            }
+
+    except Exception as e:
+        log.exception(f"Error getting base resume info: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/v2/user/base_resume/{user_id}")
+async def delete_base_resume(user_id: str):
+    """
+    Delete the user's base resume.
+    """
+    log.info(f"/v2/user/base_resume DELETE called for user {user_id}")
+
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Supabase not configured")
+
+    try:
+        result = supabase.table("user_base_resumes").delete().eq(
+            "user_id", user_id
+        ).execute()
+
+        log.info(f"Deleted base resume for user {user_id}")
+
+        return {
+            "success": True,
+            "message": "Base resume deleted successfully"
+        }
+
+    except Exception as e:
+        log.exception(f"Error deleting base resume: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =====================================================================
+# JOB APPLICATION ENDPOINTS
+# =====================================================================
+
 @app.post("/v2/apply/match_bullets")
 async def match_bullets_for_job(
     user_id: str = Form(...),
-    resume_file: UploadFile = File(...)
+    resume_file: Optional[UploadFile] = File(None)
 ):
     """
     Match bullets from uploaded resume to stored bullets with facts.
     This is the first step in the job application flow.
+
+    If resume_file is not provided, uses the user's stored base resume.
     """
     log.info(f"/v2/apply/match_bullets called for user {user_id}")
 
@@ -299,9 +438,28 @@ async def match_bullets_for_job(
         from db_utils import get_bullet_facts
         from docx import Document
 
+        # Get resume content (either from upload or base resume)
+        if resume_file:
+            log.info("Using uploaded resume file")
+            content = await resume_file.read()
+        else:
+            log.info("No file uploaded, fetching base resume")
+            if not supabase:
+                raise HTTPException(status_code=503, detail="Supabase not configured")
+
+            result = supabase.table("user_base_resumes").select("file_data").eq("user_id", user_id).execute()
+
+            if not result.data or len(result.data) == 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No resume file provided and no base resume found. Please upload a resume or set a base resume."
+                )
+
+            content = result.data[0]["file_data"]
+            log.info("Loaded base resume from database")
+
         # Extract bullets from resume
         with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp:
-            content = await resume_file.read()
             tmp.write(content)
             tmp_path = tmp.name
 
@@ -458,13 +616,6 @@ async def download_resume(
         log.error("Missing required parameter: user_id")
         raise HTTPException(status_code=400, detail="Missing required parameter: user_id")
 
-    if not file:
-        log.error("Missing required parameter: file")
-        raise HTTPException(
-            status_code=400,
-            detail="Missing required parameter: file. Please upload the original resume file."
-        )
-
     try:
         import json
 
@@ -490,20 +641,36 @@ async def download_resume(
 
         log.info(f"Extracted {len(enhanced_texts)} enhanced bullet texts")
 
-        # Read and validate file
-        raw = await file.read()
+        # Get resume content (either from upload or base resume)
+        if file:
+            log.info("Using uploaded resume file")
+            raw = await file.read()
+            file_name = file.filename or "resume.docx"
+        else:
+            log.info("No file uploaded, fetching base resume")
+            if not supabase:
+                raise HTTPException(status_code=503, detail="Supabase not configured")
+
+            result = supabase.table("user_base_resumes").select("file_data, file_name").eq("user_id", user_id).execute()
+
+            if not result.data or len(result.data) == 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No resume file provided and no base resume found. Please upload a resume or set a base resume."
+                )
+
+            raw = result.data[0]["file_data"]
+            file_name = result.data[0]["file_name"]
+            log.info(f"Loaded base resume from database: {file_name}")
+
+        # Validate file
         size = len(raw)
-        ct = file.content_type
-        log.info(f"Received file='{file.filename}' size={size}")
+        log.info(f"Using file='{file_name}' size={size}")
 
         if not raw or size < 512:
             raise HTTPException(status_code=400, detail="File is empty or too small")
 
-        if ct not in {"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                      "application/octet-stream", "application/msword"}:
-            raise HTTPException(status_code=415, detail=f"Invalid content type: {ct}")
-
-        # Parse DOCX
+        # Parse DOCX (this validates it's a valid DOCX file)
         try:
             doc = load_docx(raw)
         except Exception as e:

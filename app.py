@@ -1,6 +1,6 @@
-import os, hashlib, base64
+import os, hashlib, base64, tempfile
 from typing import Optional, List
-from fastapi import FastAPI, UploadFile, File, Form, Body
+from fastapi import FastAPI, UploadFile, File, Form, Body, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
@@ -60,6 +60,19 @@ class ConfirmFactsRequest(BaseModel):
     session_id: str
     facts: dict
     user_confirmed: bool = True
+
+
+# Pydantic models for v2 apply endpoints
+class BulletGenerationRequest(BaseModel):
+    user_id: str
+    job_description: str
+    bullets: List[str]
+
+
+class BulletGenerationResponse(BaseModel):
+    enhanced_bullets: List[str]
+    bullets_with_facts: List[int]  # Indices of bullets that used stored facts
+    bullets_without_facts: List[int]  # Indices that fell back to original
 
 
 @app.get("/")
@@ -257,6 +270,230 @@ async def get_user_bullets(user_id: str):
     except Exception as e:
         log.exception(f"Error getting user bullets: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/v2/apply/match_bullets")
+async def match_bullets_for_job(
+    user_id: str = Form(...),
+    resume_file: UploadFile = File(...)
+):
+    """
+    Match bullets from uploaded resume to stored bullets with facts.
+    This is the first step in the job application flow.
+    """
+    log.info(f"/v2/apply/match_bullets called for user {user_id}")
+
+    try:
+        from db_utils_optimized import match_bullet_with_confidence_optimized
+        from llm_utils import embed
+        from db_utils import get_bullet_facts
+        from docx import Document
+
+        # Extract bullets from resume
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp:
+            content = await resume_file.read()
+            tmp.write(content)
+            tmp_path = tmp.name
+
+        doc = Document(tmp_path)
+        bullets, _ = collect_word_numbered_bullets(doc)
+        os.unlink(tmp_path)
+
+        if not bullets:
+            raise HTTPException(status_code=400, detail="No bullets found in resume")
+
+        log.info(f"Extracted {len(bullets)} bullets from resume")
+
+        # Match each bullet
+        matches = []
+        for idx, bullet in enumerate(bullets):
+            embedding = embed(bullet)
+            match_result = match_bullet_with_confidence_optimized(user_id, bullet, embedding)
+
+            # Get facts if match found
+            facts = None
+            if match_result["bullet_id"]:
+                fact_records = get_bullet_facts(match_result["bullet_id"], confirmed_only=True)
+                if fact_records:
+                    facts = fact_records[0]["facts"]
+
+            matches.append({
+                "bullet_index": idx,
+                "bullet_text": bullet,
+                **match_result,
+                "has_facts": facts is not None,
+                "facts": facts
+            })
+
+            log.info(f"Bullet {idx}: matched={match_result['bullet_id'] is not None}, confidence={match_result.get('confidence', 0):.2f}, has_facts={facts is not None}")
+
+        log.info(f"Matched {sum(1 for m in matches if m['bullet_id'])} out of {len(bullets)} bullets")
+
+        return JSONResponse({
+            "bullets": bullets,
+            "matches": matches
+        })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception(f"Error matching bullets: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/v2/apply/generate_with_facts")
+async def generate_resume_with_facts(request: BulletGenerationRequest):
+    """
+    Generate optimized resume using stored facts for matched bullets.
+    This is the second step in the job application flow.
+    """
+    log.info(f"/v2/apply/generate_with_facts called for user {request.user_id} with {len(request.bullets)} bullets")
+
+    try:
+        from db_utils_optimized import match_bullet_with_confidence_optimized
+        from llm_utils import embed, generate_bullet_with_facts
+        from db_utils import get_bullet_facts
+
+        # For each bullet, try to find stored facts
+        enhanced_bullets = []
+        with_facts = []
+        without_facts = []
+
+        for idx, bullet in enumerate(request.bullets):
+            # Try to match bullet
+            embedding = embed(bullet)
+            match_result = match_bullet_with_confidence_optimized(
+                request.user_id,
+                bullet,
+                embedding
+            )
+
+            # Get facts if matched
+            facts = None
+            if match_result["bullet_id"]:
+                fact_records = get_bullet_facts(match_result["bullet_id"], confirmed_only=True)
+                if fact_records:
+                    facts = fact_records[0]["facts"]
+
+            if facts:
+                # Generate with facts
+                log.info(f"Generating bullet {idx} with stored facts")
+                enhanced = generate_bullet_with_facts(
+                    bullet,
+                    request.job_description,
+                    facts
+                )
+                enhanced_bullets.append(enhanced)
+                with_facts.append(idx)
+            else:
+                # Fallback to original bullet
+                log.info(f"Bullet {idx} has no stored facts, using original")
+                enhanced_bullets.append(bullet)
+                without_facts.append(idx)
+
+        log.info(f"Generated {len(with_facts)} bullets with facts, {len(without_facts)} without facts")
+
+        return {
+            "enhanced_bullets": enhanced_bullets,
+            "bullets_with_facts": with_facts,
+            "bullets_without_facts": without_facts
+        }
+
+    except Exception as e:
+        log.exception(f"Error generating with facts: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/download")
+async def download_resume(
+    file: UploadFile = File(...),
+    bullets: str = Form(...),
+    user_id: str = Form(...)
+):
+    """
+    Generate final resume DOCX with enhanced bullets.
+    Accepts original resume file and JSON string of enhanced bullets.
+    Returns modified DOCX file for download.
+    """
+    log.info(f"/download called for user {user_id}")
+
+    try:
+        import json
+
+        # Parse bullets from JSON string
+        try:
+            enhanced_bullets = json.loads(bullets)
+            if not isinstance(enhanced_bullets, list):
+                raise HTTPException(status_code=400, detail="bullets must be a JSON array")
+        except json.JSONDecodeError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid JSON in bullets: {str(e)}")
+
+        log.info(f"Received {len(enhanced_bullets)} enhanced bullets")
+
+        # Read and validate file
+        raw = await file.read()
+        size = len(raw)
+        ct = file.content_type
+        log.info(f"Received file='{file.filename}' size={size}")
+
+        if not raw or size < 512:
+            raise HTTPException(status_code=400, detail="File is empty or too small")
+
+        if ct not in {"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                      "application/octet-stream", "application/msword"}:
+            raise HTTPException(status_code=415, detail=f"Invalid content type: {ct}")
+
+        # Parse DOCX
+        try:
+            doc = load_docx(raw)
+        except Exception as e:
+            log.exception("Failed to parse DOCX")
+            raise HTTPException(status_code=400, detail=f"Failed to parse DOCX: {str(e)}")
+
+        bullets_in_doc, paras = collect_word_numbered_bullets(doc)
+        if not bullets_in_doc:
+            raise HTTPException(status_code=422, detail="No bullets found in resume")
+
+        log.info(f"Found {len(bullets_in_doc)} bullets in document")
+
+        if len(enhanced_bullets) != len(paras):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Bullet count mismatch: document has {len(paras)}, received {len(enhanced_bullets)}"
+            )
+
+        # Update document with enhanced bullets
+        for idx, (p, orig, new_text) in enumerate(zip(paras, bullets_in_doc, enhanced_bullets)):
+            # Apply character cap
+            cap = tiered_char_cap(len(orig))
+            fitted = enforce_char_cap_with_reprompt(new_text, cap)
+            set_paragraph_text_with_selective_links(p, fitted)
+
+        # Enforce single page layout
+        enforce_single_page(doc)
+
+        # Save modified document to bytes
+        from io import BytesIO
+        buf = BytesIO()
+        doc.save(buf)
+        data = buf.getvalue()
+
+        log.info(f"Generated DOCX file with {len(enhanced_bullets)} enhanced bullets")
+
+        # Return the file as a download
+        return Response(
+            content=data,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={
+                "Content-Disposition": 'attachment; filename="resume_optimized.docx"'
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception(f"Error in /download: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/upload")

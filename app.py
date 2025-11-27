@@ -17,22 +17,62 @@ from db_utils import (create_qa_session, get_qa_session, store_qa_pair, update_q
 # Helper function for robust base64 decoding
 def decode_base64(data: str) -> bytes:
     """
-    Decode base64 string with automatic padding fix and whitespace removal.
-    Handles strings with invalid padding or extra whitespace.
+    Decode base64 string with comprehensive error handling and automatic fixes.
+
+    This function provides bulletproof base64 decoding for data retrieved from
+    Supabase BYTEA columns, which may have padding issues or embedded whitespace.
+
+    Handles:
+    - Invalid padding (not multiple of 4) - automatically adds '=' padding
+    - Embedded whitespace (newlines, tabs, spaces) - strips all whitespace
+    - Leading/trailing whitespace - removed
+    - Invalid characters - validates and reports which characters are invalid
+
+    Args:
+        data (str): Base64-encoded string (may contain whitespace or invalid padding)
+
+    Returns:
+        bytes: Decoded binary data
+
+    Raises:
+        ValueError: If data contains characters outside the base64 character set
+        binascii.Error: If base64 decoding fails after all fixes
+
+    History:
+        - v1: Basic decoding with strip()
+        - v2: Added automatic padding (fixes "not multiple of 4" error)
+        - v3: Added comprehensive whitespace removal and character validation
     """
-    # Remove any whitespace
-    data = data.strip()
+    import re
+
+    # Remove ALL whitespace (spaces, tabs, newlines, etc.)
+    # This handles cases where base64 might be split across lines or have embedded spaces
+    data = re.sub(r'\s+', '', data)
+
+    # Validate that string only contains valid base64 characters
+    # Valid: A-Z, a-z, 0-9, +, /, = (padding)
+    if not re.match(r'^[A-Za-z0-9+/]*=*$', data):
+        # Find invalid characters for debugging
+        invalid_chars = set(re.findall(r'[^A-Za-z0-9+/=]', data))
+        log.error(f"Base64 decode failed - Invalid characters found: {invalid_chars}")
+        log.error(f"Data length: {len(data)}, First 100 chars: {data[:100]}")
+        raise ValueError(f"Invalid base64 characters: {invalid_chars}")
 
     # Add padding if needed
     missing_padding = len(data) % 4
     if missing_padding:
         data += '=' * (4 - missing_padding)
+        log.debug(f"Added {4 - missing_padding} padding characters to base64 string")
 
     try:
         return base64.b64decode(data)
     except Exception as e:
-        # Log the first 100 chars for debugging
-        log.error(f"Base64 decode failed. Data length: {len(data)}, First 100 chars: {data[:100]}")
+        # Detailed error logging for debugging
+        log.error(f"Base64 decode failed after validation and padding")
+        log.error(f"Data length: {len(data)} (multiple of 4: {len(data) % 4 == 0})")
+        log.error(f"First 100 chars: {data[:100]}")
+        log.error(f"Last 20 chars: {data[-20:] if len(data) > 20 else data}")
+        log.error(f"Error type: {type(e).__name__}, Message: {str(e)}")
         raise
 
 

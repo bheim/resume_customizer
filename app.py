@@ -1,6 +1,6 @@
-import os, hashlib, base64
+import os, hashlib, base64, tempfile
 from typing import Optional, List
-from fastapi import FastAPI, UploadFile, File, Form, Body
+from fastapi import FastAPI, UploadFile, File, Form, Body, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
@@ -257,6 +257,75 @@ async def get_user_bullets(user_id: str):
     except Exception as e:
         log.exception(f"Error getting user bullets: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/v2/apply/match_bullets")
+async def match_bullets_for_job(
+    user_id: str = Form(...),
+    resume_file: UploadFile = File(...)
+):
+    """
+    Match bullets from uploaded resume to stored bullets with facts.
+    This is the first step in the job application flow.
+    """
+    log.info(f"/v2/apply/match_bullets called for user {user_id}")
+
+    try:
+        from db_utils_optimized import match_bullet_with_confidence_optimized
+        from llm_utils import embed
+        from db_utils import get_bullet_facts
+        from docx import Document
+
+        # Extract bullets from resume
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp:
+            content = await resume_file.read()
+            tmp.write(content)
+            tmp_path = tmp.name
+
+        doc = Document(tmp_path)
+        bullets, _ = collect_word_numbered_bullets(doc)
+        os.unlink(tmp_path)
+
+        if not bullets:
+            raise HTTPException(status_code=400, detail="No bullets found in resume")
+
+        log.info(f"Extracted {len(bullets)} bullets from resume")
+
+        # Match each bullet
+        matches = []
+        for idx, bullet in enumerate(bullets):
+            embedding = embed(bullet)
+            match_result = match_bullet_with_confidence_optimized(user_id, bullet, embedding)
+
+            # Get facts if match found
+            facts = None
+            if match_result["bullet_id"]:
+                fact_records = get_bullet_facts(match_result["bullet_id"], confirmed_only=True)
+                if fact_records:
+                    facts = fact_records[0]["facts"]
+
+            matches.append({
+                "bullet_index": idx,
+                "bullet_text": bullet,
+                **match_result,
+                "has_facts": facts is not None,
+                "facts": facts
+            })
+
+            log.info(f"Bullet {idx}: matched={match_result['bullet_id'] is not None}, confidence={match_result.get('confidence', 0):.2f}, has_facts={facts is not None}")
+
+        log.info(f"Matched {sum(1 for m in matches if m['bullet_id'])} out of {len(bullets)} bullets")
+
+        return JSONResponse({
+            "bullets": bullets,
+            "matches": matches
+        })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception(f"Error matching bullets: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/upload")

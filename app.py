@@ -350,15 +350,16 @@ async def upload_base_resume(
             log.exception("Invalid DOCX file")
             raise HTTPException(status_code=400, detail=f"Invalid DOCX file: {str(e)}")
 
-        # Store raw bytes directly (Supabase Python client handles BYTEA encoding)
-        log.info(f"Upload - File size: {len(file_content)} bytes")
+        # Encode to base64 for Supabase REST API (BYTEA columns require base64)
+        file_content_b64 = base64.b64encode(file_content).decode('utf-8')
+        log.info(f"Upload - File size: {len(file_content)} bytes, encoded to {len(file_content_b64)} chars")
 
         # Store in database (upsert)
-        # Supabase Python client will automatically handle BYTEA encoding
+        # BYTEA columns via REST API require base64-encoded strings
         data = {
             "user_id": user_id,
             "file_name": file_name,
-            "file_data": file_content,  # Store raw bytes directly
+            "file_data": file_content_b64,  # Base64 string for BYTEA column
             "updated_at": "now()"
         }
 
@@ -369,11 +370,12 @@ async def upload_base_resume(
 
         log.info(f"Stored base resume for user {user_id}: {file_name} ({len(file_content)} bytes)")
 
-        # Immediately verify what was stored
+        # Immediately verify what was stored by decoding
         verify = supabase.table("user_base_resumes").select("file_data").eq("user_id", user_id).execute()
         if verify.data:
-            stored_data = verify.data[0]["file_data"]
-            log.info(f"Verify - Stored data length: {len(stored_data)} bytes")
+            stored_b64 = verify.data[0]["file_data"]
+            stored_data = base64.b64decode(stored_b64)
+            log.info(f"Verify - Stored data length: {len(stored_data)} bytes (from {len(stored_b64)} chars)")
             log.info(f"Verify - Match original: {stored_data == file_content}")
             if stored_data != file_content:
                 log.error("CORRUPTION DETECTED: Stored data doesn't match original!")
@@ -518,13 +520,14 @@ async def match_bullets_for_job(
                     detail="No resume file provided and no base resume found. Please upload a resume or set a base resume."
                 )
 
-            # Get raw bytes from BYTEA column
-            content = result.data[0]["file_data"]
+            # Decode from base64 (BYTEA columns return base64 strings via REST API)
+            content_b64 = result.data[0]["file_data"]
+            content = base64.b64decode(content_b64)
 
             # Log the retrieval for debugging
-            log.info(f"Retrieval - Data length: {len(content)} bytes")
-            log.info(f"Retrieval - Data type: {type(content)}")
-            log.info(f"Loaded base resume from database ({len(content)} bytes)")
+            log.info(f"Retrieval - Base64 length: {len(content_b64)} chars")
+            log.info(f"Retrieval - Decoded to {len(content)} bytes")
+            log.info(f"Loaded base resume from database")
 
         # Extract bullets from resume
         with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp:
@@ -748,8 +751,8 @@ async def download_resume(
                         detail="Session resume not found and no base resume exists. Please upload a resume."
                     )
 
-                # Get raw bytes from BYTEA column
-                raw = result.data[0]["file_data"]
+                # Decode from base64 (BYTEA columns return base64 strings via REST API)
+                raw = base64.b64decode(result.data[0]["file_data"])
                 file_name = result.data[0]["file_name"]
                 log.info(f"Loaded base resume: {file_name}")
         else:

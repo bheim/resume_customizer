@@ -350,15 +350,15 @@ async def upload_base_resume(
             log.exception("Invalid DOCX file")
             raise HTTPException(status_code=400, detail=f"Invalid DOCX file: {str(e)}")
 
-        # Store raw bytes directly (Supabase Python client handles BYTEA encoding)
+        # Base64-encode bytes for BYTEA column storage
         log.info(f"Upload - File size: {len(file_content)} bytes")
+        file_data_b64 = base64.b64encode(file_content).decode('utf-8')
 
         # Store in database (upsert)
-        # Supabase Python client will automatically handle BYTEA encoding
         data = {
             "user_id": user_id,
             "file_name": file_name,
-            "file_data": file_content,  # Store raw bytes directly
+            "file_data": file_data_b64,  # Store base64-encoded string
             "updated_at": "now()"
         }
 
@@ -372,7 +372,8 @@ async def upload_base_resume(
         # Immediately verify what was stored
         verify = supabase.table("user_base_resumes").select("file_data").eq("user_id", user_id).execute()
         if verify.data:
-            stored_data = verify.data[0]["file_data"]
+            stored_data_b64 = verify.data[0]["file_data"]
+            stored_data = decode_base64(stored_data_b64)
             log.info(f"Verify - Stored data length: {len(stored_data)} bytes")
             log.info(f"Verify - Match original: {stored_data == file_content}")
             if stored_data != file_content:
@@ -518,8 +519,9 @@ async def match_bullets_for_job(
                     detail="No resume file provided and no base resume found. Please upload a resume or set a base resume."
                 )
 
-            # Get raw bytes from BYTEA column
-            content = result.data[0]["file_data"]
+            # Decode base64 string from BYTEA column to get raw bytes
+            content_b64 = result.data[0]["file_data"]
+            content = decode_base64(content_b64)
 
             # Log the retrieval for debugging
             log.info(f"Retrieval - Data length: {len(content)} bytes")

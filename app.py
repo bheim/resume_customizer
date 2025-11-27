@@ -350,21 +350,15 @@ async def upload_base_resume(
             log.exception("Invalid DOCX file")
             raise HTTPException(status_code=400, detail=f"Invalid DOCX file: {str(e)}")
 
-        # Encode file content as base64 for storage
-        file_content_b64 = base64.b64encode(file_content).decode('utf-8')
-
-        # Log the encoding for debugging
-        log.info(f"Upload - Original file size: {len(file_content)} bytes")
-        log.info(f"Upload - Base64 encoded length: {len(file_content_b64)} chars")
-        log.info(f"Upload - Base64 length % 4 = {len(file_content_b64) % 4} (should be 0)")
-        log.info(f"Upload - First 100 chars: {file_content_b64[:100]}")
-        log.info(f"Upload - Last 100 chars: {file_content_b64[-100:]}")
+        # Store raw bytes directly (Supabase Python client handles BYTEA encoding)
+        log.info(f"Upload - File size: {len(file_content)} bytes")
 
         # Store in database (upsert)
+        # Supabase Python client will automatically handle BYTEA encoding
         data = {
             "user_id": user_id,
             "file_name": file_name,
-            "file_data": file_content_b64,
+            "file_data": file_content,  # Store raw bytes directly
             "updated_at": "now()"
         }
 
@@ -373,19 +367,18 @@ async def upload_base_resume(
             on_conflict="user_id"
         ).execute()
 
-        log.info(f"Stored base resume for user {user_id}: {file_name}")
+        log.info(f"Stored base resume for user {user_id}: {file_name} ({len(file_content)} bytes)")
 
         # Immediately verify what was stored
         verify = supabase.table("user_base_resumes").select("file_data").eq("user_id", user_id).execute()
         if verify.data:
-            stored_b64 = verify.data[0]["file_data"]
-            log.info(f"Verify - Stored base64 length: {len(stored_b64)} chars")
-            log.info(f"Verify - Stored base64 length % 4 = {len(stored_b64) % 4}")
-            log.info(f"Verify - Match original: {stored_b64 == file_content_b64}")
-            if stored_b64 != file_content_b64:
+            stored_data = verify.data[0]["file_data"]
+            log.info(f"Verify - Stored data length: {len(stored_data)} bytes")
+            log.info(f"Verify - Match original: {stored_data == file_content}")
+            if stored_data != file_content:
                 log.error("CORRUPTION DETECTED: Stored data doesn't match original!")
-                log.error(f"Original length: {len(file_content_b64)}, Stored length: {len(stored_b64)}")
-                log.error(f"Difference: {len(stored_b64) - len(file_content_b64)} chars")
+                log.error(f"Original length: {len(file_content)}, Stored length: {len(stored_data)}")
+                log.error(f"Difference: {len(stored_data) - len(file_content)} bytes")
 
         return {
             "success": True,
@@ -525,24 +518,13 @@ async def match_bullets_for_job(
                     detail="No resume file provided and no base resume found. Please upload a resume or set a base resume."
                 )
 
-            # Decode from base64
-            content_b64 = result.data[0]["file_data"]
+            # Get raw bytes from BYTEA column
+            content = result.data[0]["file_data"]
 
             # Log the retrieval for debugging
-            log.info(f"Retrieval - Base64 length: {len(content_b64)} chars")
-            log.info(f"Retrieval - Base64 length % 4 = {len(content_b64) % 4} (should be 0)")
-            log.info(f"Retrieval - First 100 chars: {content_b64[:100]}")
-            log.info(f"Retrieval - Last 100 chars: {content_b64[-100:]}")
-            log.info(f"Retrieval - Type: {type(content_b64)}")
-
-            # Check for unexpected characters
-            if content_b64 and len(content_b64) > 0:
-                log.info(f"Retrieval - Last char code: {ord(content_b64[-1])}")
-                if content_b64[-1] in ['\n', '\r', ' ', '\t']:
-                    log.warning(f"Retrieval - Found whitespace at end: {repr(content_b64[-1])}")
-
-            content = decode_base64(content_b64)
-            log.info(f"Loaded base resume from database, decoded to {len(content)} bytes")
+            log.info(f"Retrieval - Data length: {len(content)} bytes")
+            log.info(f"Retrieval - Data type: {type(content)}")
+            log.info(f"Loaded base resume from database ({len(content)} bytes)")
 
         # Extract bullets from resume
         with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp:
@@ -766,8 +748,8 @@ async def download_resume(
                         detail="Session resume not found and no base resume exists. Please upload a resume."
                     )
 
-                # Decode from base64
-                raw = decode_base64(result.data[0]["file_data"])
+                # Get raw bytes from BYTEA column
+                raw = result.data[0]["file_data"]
                 file_name = result.data[0]["file_name"]
                 log.info(f"Loaded base resume: {file_name}")
         else:

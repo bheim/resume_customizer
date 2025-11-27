@@ -429,19 +429,41 @@ async def match_bullets_for_job(
     This is the first step in the job application flow.
 
     If resume_file is not provided, uses the user's stored base resume.
+    Returns a session_id that can be used to retrieve this resume later.
     """
     log.info(f"/v2/apply/match_bullets called for user {user_id}")
 
     try:
+        import uuid
         from db_utils_optimized import match_bullet_with_confidence_optimized
         from llm_utils import embed
         from db_utils import get_bullet_facts
         from docx import Document
 
+        # Generate session ID for this job application
+        session_id = str(uuid.uuid4())
+
         # Get resume content (either from upload or base resume)
         if resume_file:
             log.info("Using uploaded resume file")
             content = await resume_file.read()
+            resume_name = resume_file.filename or "resume.docx"
+
+            # Store uploaded resume in session table for later retrieval
+            if not supabase:
+                raise HTTPException(status_code=503, detail="Supabase not configured")
+
+            try:
+                supabase.table("job_application_sessions").insert({
+                    "user_id": user_id,
+                    "session_id": session_id,
+                    "resume_data": content,
+                    "resume_name": resume_name
+                }).execute()
+                log.info(f"Stored session resume for session {session_id}")
+            except Exception as e:
+                log.warning(f"Failed to store session resume: {e}")
+                # Continue anyway - not critical
         else:
             log.info("No file uploaded, fetching base resume")
             if not supabase:
@@ -498,6 +520,7 @@ async def match_bullets_for_job(
         log.info(f"Matched {sum(1 for m in matches if m['bullet_id'])} out of {len(bullets)} bullets")
 
         return JSONResponse({
+            "session_id": session_id,
             "bullets": bullets,
             "matches": matches
         })
@@ -597,15 +620,21 @@ async def generate_resume_with_facts(request: BulletGenerationRequest):
 async def download_resume(
     bullets: Optional[str] = Form(None),
     user_id: Optional[str] = Form(None),
+    session_id: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None)
 ):
     """
     Generate final resume DOCX with enhanced bullets.
-    Accepts original resume file and JSON string of enhanced bullets.
+
+    Priority order for resume source:
+    1. Uploaded file (if provided)
+    2. Session resume (if session_id provided)
+    3. Base resume (if exists)
+
     Returns modified DOCX file for download.
     """
     log.info(f"/download called")
-    log.info(f"Received parameters: bullets={'present' if bullets else 'missing'}, user_id={user_id}, file={'present' if file else 'missing'}")
+    log.info(f"Received parameters: bullets={'present' if bullets else 'missing'}, user_id={user_id}, session_id={session_id}, file={'present' if file else 'missing'}")
 
     # Validate required parameters
     if not bullets:
@@ -641,27 +670,58 @@ async def download_resume(
 
         log.info(f"Extracted {len(enhanced_texts)} enhanced bullet texts")
 
-        # Get resume content (either from upload or base resume)
+        # Get resume content with priority: uploaded file > session resume > base resume
         if file:
-            log.info("Using uploaded resume file")
+            log.info("Priority 1: Using uploaded resume file")
             raw = await file.read()
             file_name = file.filename or "resume.docx"
-        else:
-            log.info("No file uploaded, fetching base resume")
+        elif session_id:
+            log.info(f"Priority 2: Fetching session resume for session {session_id}")
             if not supabase:
                 raise HTTPException(status_code=503, detail="Supabase not configured")
 
-            result = supabase.table("user_base_resumes").select("file_data, file_name").eq("user_id", user_id).execute()
+            result = supabase.table("job_application_sessions").select(
+                "resume_data, resume_name"
+            ).eq("session_id", session_id).execute()
+
+            if result.data and len(result.data) > 0:
+                raw = result.data[0]["resume_data"]
+                file_name = result.data[0]["resume_name"]
+                log.info(f"Loaded session resume: {file_name}")
+            else:
+                # Session not found, fall back to base resume
+                log.warning(f"Session {session_id} not found, falling back to base resume")
+                result = supabase.table("user_base_resumes").select(
+                    "file_data, file_name"
+                ).eq("user_id", user_id).execute()
+
+                if not result.data or len(result.data) == 0:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Session resume not found and no base resume exists. Please upload a resume."
+                    )
+
+                raw = result.data[0]["file_data"]
+                file_name = result.data[0]["file_name"]
+                log.info(f"Loaded base resume: {file_name}")
+        else:
+            log.info("Priority 3: Fetching base resume")
+            if not supabase:
+                raise HTTPException(status_code=503, detail="Supabase not configured")
+
+            result = supabase.table("user_base_resumes").select(
+                "file_data, file_name"
+            ).eq("user_id", user_id).execute()
 
             if not result.data or len(result.data) == 0:
                 raise HTTPException(
                     status_code=400,
-                    detail="No resume file provided and no base resume found. Please upload a resume or set a base resume."
+                    detail="No resume file, session, or base resume found. Please upload a resume."
                 )
 
             raw = result.data[0]["file_data"]
             file_name = result.data[0]["file_name"]
-            log.info(f"Loaded base resume from database: {file_name}")
+            log.info(f"Loaded base resume: {file_name}")
 
         # Validate file
         size = len(raw)

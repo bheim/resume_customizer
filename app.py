@@ -17,14 +17,23 @@ from db_utils import (create_qa_session, get_qa_session, store_qa_pair, update_q
 # Helper function for robust base64 decoding
 def decode_base64(data: str) -> bytes:
     """
-    Decode base64 string with automatic padding fix.
-    Handles strings with invalid padding.
+    Decode base64 string with automatic padding fix and whitespace removal.
+    Handles strings with invalid padding or extra whitespace.
     """
+    # Remove any whitespace
+    data = data.strip()
+
     # Add padding if needed
     missing_padding = len(data) % 4
     if missing_padding:
         data += '=' * (4 - missing_padding)
-    return base64.b64decode(data)
+
+    try:
+        return base64.b64decode(data)
+    except Exception as e:
+        # Log the first 100 chars for debugging
+        log.error(f"Base64 decode failed. Data length: {len(data)}, First 100 chars: {data[:100]}")
+        raise
 
 
 # Import new v2 endpoints

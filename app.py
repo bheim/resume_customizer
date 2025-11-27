@@ -63,10 +63,16 @@ class ConfirmFactsRequest(BaseModel):
 
 
 # Pydantic models for v2 apply endpoints
+class BulletItem(BaseModel):
+    bullet_text: str
+    bullet_id: Optional[str] = None
+    use_stored_facts: bool = True
+
+
 class BulletGenerationRequest(BaseModel):
     user_id: str
     job_description: str
-    bullets: List[str]
+    bullets: List[BulletItem]
 
 
 class BulletGenerationResponse(BaseModel):
@@ -359,27 +365,39 @@ async def generate_resume_with_facts(request: BulletGenerationRequest):
         with_facts = []
         without_facts = []
 
-        for idx, bullet in enumerate(request.bullets):
-            # Try to match bullet
-            embedding = embed(bullet)
-            match_result = match_bullet_with_confidence_optimized(
-                request.user_id,
-                bullet,
-                embedding
-            )
+        for idx, bullet_item in enumerate(request.bullets):
+            bullet_text = bullet_item.bullet_text
 
-            # Get facts if matched
+            # Skip fact-based generation if explicitly requested
+            if not bullet_item.use_stored_facts:
+                log.info(f"Bullet {idx} opted out of using stored facts")
+                enhanced_bullets.append(bullet_text)
+                without_facts.append(idx)
+                continue
+
+            # Use provided bullet_id if available, otherwise match
+            bullet_id = bullet_item.bullet_id
+            if not bullet_id:
+                embedding = embed(bullet_text)
+                match_result = match_bullet_with_confidence_optimized(
+                    request.user_id,
+                    bullet_text,
+                    embedding
+                )
+                bullet_id = match_result.get("bullet_id")
+
+            # Get facts if we have a bullet_id
             facts = None
-            if match_result["bullet_id"]:
-                fact_records = get_bullet_facts(match_result["bullet_id"], confirmed_only=True)
+            if bullet_id:
+                fact_records = get_bullet_facts(bullet_id, confirmed_only=True)
                 if fact_records:
                     facts = fact_records[0]["facts"]
 
             if facts:
                 # Generate with facts
-                log.info(f"Generating bullet {idx} with stored facts")
+                log.info(f"Generating bullet {idx} with stored facts (bullet_id: {bullet_id})")
                 enhanced = generate_bullet_with_facts(
-                    bullet,
+                    bullet_text,
                     request.job_description,
                     facts
                 )
@@ -388,7 +406,7 @@ async def generate_resume_with_facts(request: BulletGenerationRequest):
             else:
                 # Fallback to original bullet
                 log.info(f"Bullet {idx} has no stored facts, using original")
-                enhanced_bullets.append(bullet)
+                enhanced_bullets.append(bullet_text)
                 without_facts.append(idx)
 
         log.info(f"Generated {len(with_facts)} bullets with facts, {len(without_facts)} without facts")

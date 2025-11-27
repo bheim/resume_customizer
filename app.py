@@ -407,8 +407,14 @@ async def generate_resume_with_facts(request: BulletGenerationRequest):
                     used_facts = True
                     with_facts_count += 1
                 else:
-                    # Fallback to original bullet
-                    log.info(f"Bullet {idx} has no stored facts, using original")
+                    # Generate without facts (still optimize using job description)
+                    log.info(f"Bullet {idx} has no stored facts, optimizing without facts")
+                    enhanced_text = generate_bullet_with_facts(
+                        bullet_text,
+                        request.job_description,
+                        {}  # Empty facts dict
+                    )
+                    used_facts = False
                     without_facts_count += 1
 
             # Add to results
@@ -431,20 +437,29 @@ async def generate_resume_with_facts(request: BulletGenerationRequest):
 
 @app.post("/download")
 async def download_resume(
-    bullets: str = Form(...),
-    user_id: str = Form(...),
-    file: UploadFile = File(None)
+    bullets: Optional[str] = Form(None),
+    user_id: Optional[str] = Form(None),
+    file: Optional[UploadFile] = File(None)
 ):
     """
     Generate final resume DOCX with enhanced bullets.
     Accepts original resume file and JSON string of enhanced bullets.
     Returns modified DOCX file for download.
     """
-    log.info(f"/download called for user {user_id}")
+    log.info(f"/download called")
+    log.info(f"Received parameters: bullets={'present' if bullets else 'missing'}, user_id={user_id}, file={'present' if file else 'missing'}")
 
-    # Check if file was provided
+    # Validate required parameters
+    if not bullets:
+        log.error("Missing required parameter: bullets")
+        raise HTTPException(status_code=400, detail="Missing required parameter: bullets (JSON string)")
+
+    if not user_id:
+        log.error("Missing required parameter: user_id")
+        raise HTTPException(status_code=400, detail="Missing required parameter: user_id")
+
     if not file:
-        log.error("No file provided to /download endpoint")
+        log.error("Missing required parameter: file")
         raise HTTPException(
             status_code=400,
             detail="Missing required parameter: file. Please upload the original resume file."

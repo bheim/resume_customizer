@@ -75,10 +75,14 @@ class BulletGenerationRequest(BaseModel):
     bullets: List[BulletItem]
 
 
+class EnhancedBulletItem(BaseModel):
+    original: str
+    enhanced: str
+    used_facts: bool
+
+
 class BulletGenerationResponse(BaseModel):
-    enhanced_bullets: List[str]
-    bullets_with_facts: List[int]  # Indices of bullets that used stored facts
-    bullets_without_facts: List[int]  # Indices that fell back to original
+    enhanced_bullets: List[EnhancedBulletItem]
 
 
 @app.get("/")
@@ -362,59 +366,62 @@ async def generate_resume_with_facts(request: BulletGenerationRequest):
 
         # For each bullet, try to find stored facts
         enhanced_bullets = []
-        with_facts = []
-        without_facts = []
+        with_facts_count = 0
+        without_facts_count = 0
 
         for idx, bullet_item in enumerate(request.bullets):
             bullet_text = bullet_item.bullet_text
+            used_facts = False
+            enhanced_text = bullet_text  # Default to original
 
             # Skip fact-based generation if explicitly requested
             if not bullet_item.use_stored_facts:
                 log.info(f"Bullet {idx} opted out of using stored facts")
-                enhanced_bullets.append(bullet_text)
-                without_facts.append(idx)
-                continue
-
-            # Use provided bullet_id if available, otherwise match
-            bullet_id = bullet_item.bullet_id
-            if not bullet_id:
-                embedding = embed(bullet_text)
-                match_result = match_bullet_with_confidence_optimized(
-                    request.user_id,
-                    bullet_text,
-                    embedding
-                )
-                bullet_id = match_result.get("bullet_id")
-
-            # Get facts if we have a bullet_id
-            facts = None
-            if bullet_id:
-                fact_records = get_bullet_facts(bullet_id, confirmed_only=True)
-                if fact_records:
-                    facts = fact_records[0]["facts"]
-
-            if facts:
-                # Generate with facts
-                log.info(f"Generating bullet {idx} with stored facts (bullet_id: {bullet_id})")
-                enhanced = generate_bullet_with_facts(
-                    bullet_text,
-                    request.job_description,
-                    facts
-                )
-                enhanced_bullets.append(enhanced)
-                with_facts.append(idx)
             else:
-                # Fallback to original bullet
-                log.info(f"Bullet {idx} has no stored facts, using original")
-                enhanced_bullets.append(bullet_text)
-                without_facts.append(idx)
+                # Use provided bullet_id if available, otherwise match
+                bullet_id = bullet_item.bullet_id
+                if not bullet_id:
+                    embedding = embed(bullet_text)
+                    match_result = match_bullet_with_confidence_optimized(
+                        request.user_id,
+                        bullet_text,
+                        embedding
+                    )
+                    bullet_id = match_result.get("bullet_id")
 
-        log.info(f"Generated {len(with_facts)} bullets with facts, {len(without_facts)} without facts")
+                # Get facts if we have a bullet_id
+                facts = None
+                if bullet_id:
+                    fact_records = get_bullet_facts(bullet_id, confirmed_only=True)
+                    if fact_records:
+                        facts = fact_records[0]["facts"]
+
+                if facts:
+                    # Generate with facts
+                    log.info(f"Generating bullet {idx} with stored facts (bullet_id: {bullet_id})")
+                    enhanced_text = generate_bullet_with_facts(
+                        bullet_text,
+                        request.job_description,
+                        facts
+                    )
+                    used_facts = True
+                    with_facts_count += 1
+                else:
+                    # Fallback to original bullet
+                    log.info(f"Bullet {idx} has no stored facts, using original")
+                    without_facts_count += 1
+
+            # Add to results
+            enhanced_bullets.append({
+                "original": bullet_text,
+                "enhanced": enhanced_text,
+                "used_facts": used_facts
+            })
+
+        log.info(f"Generated {with_facts_count} bullets with facts, {without_facts_count} without facts")
 
         return {
-            "enhanced_bullets": enhanced_bullets,
-            "bullets_with_facts": with_facts,
-            "bullets_without_facts": without_facts
+            "enhanced_bullets": enhanced_bullets
         }
 
     except Exception as e:
@@ -424,9 +431,9 @@ async def generate_resume_with_facts(request: BulletGenerationRequest):
 
 @app.post("/download")
 async def download_resume(
-    file: UploadFile = File(...),
     bullets: str = Form(...),
-    user_id: str = Form(...)
+    user_id: str = Form(...),
+    file: UploadFile = File(None)
 ):
     """
     Generate final resume DOCX with enhanced bullets.
@@ -434,6 +441,14 @@ async def download_resume(
     Returns modified DOCX file for download.
     """
     log.info(f"/download called for user {user_id}")
+
+    # Check if file was provided
+    if not file:
+        log.error("No file provided to /download endpoint")
+        raise HTTPException(
+            status_code=400,
+            detail="Missing required parameter: file. Please upload the original resume file."
+        )
 
     try:
         import json
@@ -447,6 +462,18 @@ async def download_resume(
             raise HTTPException(status_code=400, detail=f"Invalid JSON in bullets: {str(e)}")
 
         log.info(f"Received {len(enhanced_bullets)} enhanced bullets")
+
+        # Extract enhanced text from bullets (handle both string and object formats)
+        enhanced_texts = []
+        for bullet in enhanced_bullets:
+            if isinstance(bullet, dict):
+                # Frontend sent {original, enhanced, used_facts} format
+                enhanced_texts.append(bullet.get("enhanced", bullet.get("original", "")))
+            else:
+                # Frontend sent just strings
+                enhanced_texts.append(str(bullet))
+
+        log.info(f"Extracted {len(enhanced_texts)} enhanced bullet texts")
 
         # Read and validate file
         raw = await file.read()
@@ -474,14 +501,14 @@ async def download_resume(
 
         log.info(f"Found {len(bullets_in_doc)} bullets in document")
 
-        if len(enhanced_bullets) != len(paras):
+        if len(enhanced_texts) != len(paras):
             raise HTTPException(
                 status_code=400,
-                detail=f"Bullet count mismatch: document has {len(paras)}, received {len(enhanced_bullets)}"
+                detail=f"Bullet count mismatch: document has {len(paras)}, received {len(enhanced_texts)}"
             )
 
         # Update document with enhanced bullets
-        for idx, (p, orig, new_text) in enumerate(zip(paras, bullets_in_doc, enhanced_bullets)):
+        for idx, (p, orig, new_text) in enumerate(zip(paras, bullets_in_doc, enhanced_texts)):
             # Apply character cap
             cap = tiered_char_cap(len(orig))
             fitted = enforce_char_cap_with_reprompt(new_text, cap)
@@ -496,7 +523,7 @@ async def download_resume(
         doc.save(buf)
         data = buf.getvalue()
 
-        log.info(f"Generated DOCX file with {len(enhanced_bullets)} enhanced bullets")
+        log.info(f"Generated DOCX file with {len(enhanced_texts)} enhanced bullets")
 
         # Return the file as a download
         return Response(

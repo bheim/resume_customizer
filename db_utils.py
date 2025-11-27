@@ -296,6 +296,7 @@ def store_user_bullet(user_id: str, bullet_text: str, embedding: List[float],
                      source_resume: Optional[str] = None) -> Optional[str]:
     """
     Store a bullet with its embedding in the database.
+    If bullet already exists (same user + normalized text), update it instead of creating duplicate.
 
     Args:
         user_id: User identifier
@@ -311,22 +312,45 @@ def store_user_bullet(user_id: str, bullet_text: str, embedding: List[float],
         return None
 
     try:
-        data = {
-            "user_id": user_id,
-            "bullet_text": bullet_text,
-            "bullet_embedding": embedding,
-            "source_resume_name": source_resume
-        }
+        # Check if bullet already exists for this user
+        existing_id = check_exact_match(user_id, bullet_text)
 
-        result = supabase.table("user_bullets").insert(data).execute()
+        if existing_id:
+            # Update existing bullet
+            log.info(f"Bullet already exists: {existing_id}, updating embedding")
+            update_data = {
+                "bullet_embedding": embedding,
+                "updated_at": "now()"
+            }
+            if source_resume:
+                update_data["source_resume_name"] = source_resume
 
-        if result.data and len(result.data) > 0:
-            bullet_id = result.data[0]["id"]
-            log.info(f"Stored bullet: {bullet_id}")
-            return bullet_id
+            result = supabase.table("user_bullets").update(update_data).eq("id", existing_id).execute()
+
+            if result.data and len(result.data) > 0:
+                log.info(f"Updated existing bullet: {existing_id}")
+                return existing_id
+            else:
+                log.warning(f"Update returned no data, returning existing ID anyway: {existing_id}")
+                return existing_id
         else:
-            log.error("Failed to store bullet: no data returned")
-            return None
+            # Create new bullet
+            data = {
+                "user_id": user_id,
+                "bullet_text": bullet_text,
+                "bullet_embedding": embedding,
+                "source_resume_name": source_resume
+            }
+
+            result = supabase.table("user_bullets").insert(data).execute()
+
+            if result.data and len(result.data) > 0:
+                bullet_id = result.data[0]["id"]
+                log.info(f"Stored new bullet: {bullet_id}")
+                return bullet_id
+            else:
+                log.error("Failed to store bullet: no data returned")
+                return None
 
     except Exception as e:
         log.exception(f"Error storing bullet: {e}")
@@ -567,6 +591,7 @@ def store_bullet_facts(bullet_id: str, facts: Dict[str, Any],
                       confirmed: bool = False) -> Optional[str]:
     """
     Store extracted facts for a bullet.
+    If facts already exist for this bullet, update them instead of creating duplicates.
 
     Args:
         bullet_id: The bullet ID
@@ -582,22 +607,47 @@ def store_bullet_facts(bullet_id: str, facts: Dict[str, Any],
         return None
 
     try:
-        data = {
-            "bullet_id": bullet_id,
-            "facts": facts,
-            "qa_session_id": qa_session_id,
-            "confirmed_by_user": confirmed
-        }
+        # Check if facts already exist for this bullet
+        existing = supabase.table("bullet_facts").select("id").eq("bullet_id", bullet_id).order("created_at", desc=True).limit(1).execute()
 
-        result = supabase.table("bullet_facts").insert(data).execute()
+        if existing.data and len(existing.data) > 0:
+            # Update existing facts
+            fact_id = existing.data[0]["id"]
+            log.info(f"Updating existing facts for bullet {bullet_id}: {fact_id}")
 
-        if result.data and len(result.data) > 0:
-            fact_id = result.data[0]["id"]
-            log.info(f"Stored facts for bullet {bullet_id}: {fact_id}")
-            return fact_id
+            update_data = {
+                "facts": facts,
+                "qa_session_id": qa_session_id,
+                "confirmed_by_user": confirmed,
+                "updated_at": "now()"
+            }
+
+            result = supabase.table("bullet_facts").update(update_data).eq("id", fact_id).execute()
+
+            if result.data and len(result.data) > 0:
+                log.info(f"Updated facts for bullet {bullet_id}: {fact_id}")
+                return fact_id
+            else:
+                log.warning(f"Update returned no data, returning existing ID: {fact_id}")
+                return fact_id
         else:
-            log.error("Failed to store facts: no data returned")
-            return None
+            # Create new facts
+            data = {
+                "bullet_id": bullet_id,
+                "facts": facts,
+                "qa_session_id": qa_session_id,
+                "confirmed_by_user": confirmed
+            }
+
+            result = supabase.table("bullet_facts").insert(data).execute()
+
+            if result.data and len(result.data) > 0:
+                fact_id = result.data[0]["id"]
+                log.info(f"Stored new facts for bullet {bullet_id}: {fact_id}")
+                return fact_id
+            else:
+                log.error("Failed to store facts: no data returned")
+                return None
 
     except Exception as e:
         log.exception(f"Error storing facts: {e}")

@@ -13,6 +13,20 @@ from db_utils import (create_qa_session, get_qa_session, store_qa_pair, update_q
                       get_session_qa_pairs, get_user_context, store_user_context,
                       update_session_status, get_answered_qa_pairs)
 
+
+# Helper function for robust base64 decoding
+def decode_base64(data: str) -> bytes:
+    """
+    Decode base64 string with automatic padding fix.
+    Handles strings with invalid padding.
+    """
+    # Add padding if needed
+    missing_padding = len(data) % 4
+    if missing_padding:
+        data += '=' * (4 - missing_padding)
+    return base64.b64decode(data)
+
+
 # Import new v2 endpoints
 try:
     from api_endpoints_new import router as v2_router
@@ -485,7 +499,7 @@ async def match_bullets_for_job(
 
             # Decode from base64
             content_b64 = result.data[0]["file_data"]
-            content = base64.b64decode(content_b64)
+            content = decode_base64(content_b64)
             log.info("Loaded base resume from database")
 
         # Extract bullets from resume
@@ -694,7 +708,7 @@ async def download_resume(
 
             if result.data and len(result.data) > 0:
                 # Decode from base64
-                raw = base64.b64decode(result.data[0]["resume_data"])
+                raw = decode_base64(result.data[0]["resume_data"])
                 file_name = result.data[0]["resume_name"]
                 log.info(f"Loaded session resume: {file_name}")
             else:
@@ -711,7 +725,7 @@ async def download_resume(
                     )
 
                 # Decode from base64
-                raw = base64.b64decode(result.data[0]["file_data"])
+                raw = decode_base64(result.data[0]["file_data"])
                 file_name = result.data[0]["file_name"]
                 log.info(f"Loaded base resume: {file_name}")
         else:
@@ -730,7 +744,7 @@ async def download_resume(
                 )
 
             # Decode from base64
-            raw = base64.b64decode(result.data[0]["file_data"])
+            raw = decode_base64(result.data[0]["file_data"])
             file_name = result.data[0]["file_name"]
             log.info(f"Loaded base resume: {file_name}")
 

@@ -375,6 +375,18 @@ async def upload_base_resume(
 
         log.info(f"Stored base resume for user {user_id}: {file_name}")
 
+        # Immediately verify what was stored
+        verify = supabase.table("user_base_resumes").select("file_data").eq("user_id", user_id).execute()
+        if verify.data:
+            stored_b64 = verify.data[0]["file_data"]
+            log.info(f"Verify - Stored base64 length: {len(stored_b64)} chars")
+            log.info(f"Verify - Stored base64 length % 4 = {len(stored_b64) % 4}")
+            log.info(f"Verify - Match original: {stored_b64 == file_content_b64}")
+            if stored_b64 != file_content_b64:
+                log.error("CORRUPTION DETECTED: Stored data doesn't match original!")
+                log.error(f"Original length: {len(file_content_b64)}, Stored length: {len(stored_b64)}")
+                log.error(f"Difference: {len(stored_b64) - len(file_content_b64)} chars")
+
         return {
             "success": True,
             "file_name": file_name,
@@ -521,6 +533,13 @@ async def match_bullets_for_job(
             log.info(f"Retrieval - Base64 length % 4 = {len(content_b64) % 4} (should be 0)")
             log.info(f"Retrieval - First 100 chars: {content_b64[:100]}")
             log.info(f"Retrieval - Last 100 chars: {content_b64[-100:]}")
+            log.info(f"Retrieval - Type: {type(content_b64)}")
+
+            # Check for unexpected characters
+            if content_b64 and len(content_b64) > 0:
+                log.info(f"Retrieval - Last char code: {ord(content_b64[-1])}")
+                if content_b64[-1] in ['\n', '\r', ' ', '\t']:
+                    log.warning(f"Retrieval - Found whitespace at end: {repr(content_b64[-1])}")
 
             content = decode_base64(content_b64)
             log.info(f"Loaded base resume from database, decoded to {len(content)} bytes")

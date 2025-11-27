@@ -353,6 +353,13 @@ async def upload_base_resume(
         # Encode file content as base64 for storage
         file_content_b64 = base64.b64encode(file_content).decode('utf-8')
 
+        # Log the encoding for debugging
+        log.info(f"Upload - Original file size: {len(file_content)} bytes")
+        log.info(f"Upload - Base64 encoded length: {len(file_content_b64)} chars")
+        log.info(f"Upload - Base64 length % 4 = {len(file_content_b64) % 4} (should be 0)")
+        log.info(f"Upload - First 100 chars: {file_content_b64[:100]}")
+        log.info(f"Upload - Last 100 chars: {file_content_b64[-100:]}")
+
         # Store in database (upsert)
         data = {
             "user_id": user_id,
@@ -508,15 +515,15 @@ async def match_bullets_for_job(
 
             # Decode from base64
             content_b64 = result.data[0]["file_data"]
-            try:
-                content = decode_base64(content_b64)
-                log.info("Loaded base resume from database")
-            except Exception as e:
-                log.error(f"Failed to decode base resume: {e}")
-                raise HTTPException(
-                    status_code=400,
-                    detail="Your base resume is corrupted. Please delete it and upload a new one via Settings → My Base Resume."
-                )
+
+            # Log the retrieval for debugging
+            log.info(f"Retrieval - Base64 length: {len(content_b64)} chars")
+            log.info(f"Retrieval - Base64 length % 4 = {len(content_b64) % 4} (should be 0)")
+            log.info(f"Retrieval - First 100 chars: {content_b64[:100]}")
+            log.info(f"Retrieval - Last 100 chars: {content_b64[-100:]}")
+
+            content = decode_base64(content_b64)
+            log.info(f"Loaded base resume from database, decoded to {len(content)} bytes")
 
         # Extract bullets from resume
         with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp:

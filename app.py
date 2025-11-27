@@ -508,8 +508,15 @@ async def match_bullets_for_job(
 
             # Decode from base64
             content_b64 = result.data[0]["file_data"]
-            content = decode_base64(content_b64)
-            log.info("Loaded base resume from database")
+            try:
+                content = decode_base64(content_b64)
+                log.info("Loaded base resume from database")
+            except Exception as e:
+                log.error(f"Failed to decode base resume: {e}")
+                raise HTTPException(
+                    status_code=400,
+                    detail="Your base resume is corrupted. Please delete it and upload a new one via Settings → My Base Resume."
+                )
 
         # Extract bullets from resume
         with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp:

@@ -14,66 +14,100 @@ from db_utils import (create_qa_session, get_qa_session, store_qa_pair, update_q
                       update_session_status, get_answered_qa_pairs)
 
 
-# Helper function for robust base64 decoding
+# Helper function for robust base64/hex decoding
 def decode_base64(data: str) -> bytes:
     """
-    Decode base64 string with comprehensive error handling and automatic fixes.
+    Decode base64 or hex-encoded string with comprehensive error handling.
 
-    This function provides bulletproof base64 decoding for data retrieved from
-    Supabase BYTEA columns, which may have padding issues or embedded whitespace.
+    This function provides bulletproof decoding for data retrieved from
+    Supabase BYTEA columns, which may be returned as base64 OR hex-encoded.
 
     Handles:
+    - Hex-encoded format (e.g., "\\x504b03..." from Supabase BYTEA)
+    - Base64-encoded format (e.g., "UEsDBB..." standard base64)
     - Invalid padding (not multiple of 4) - automatically adds '=' padding
     - Embedded whitespace (newlines, tabs, spaces) - strips all whitespace
     - Leading/trailing whitespace - removed
     - Invalid characters - validates and reports which characters are invalid
 
     Args:
-        data (str): Base64-encoded string (may contain whitespace or invalid padding)
+        data (str): Encoded string (hex or base64, may contain whitespace)
 
     Returns:
         bytes: Decoded binary data
 
     Raises:
-        ValueError: If data contains characters outside the base64 character set
-        binascii.Error: If base64 decoding fails after all fixes
+        ValueError: If data contains invalid characters for both formats
+        binascii.Error: If decoding fails after all fixes
 
     History:
-        - v1: Basic decoding with strip()
+        - v1: Basic base64 decoding with strip()
         - v2: Added automatic padding (fixes "not multiple of 4" error)
         - v3: Added comprehensive whitespace removal and character validation
+        - v4: Added hex-encoding support for Supabase BYTEA columns
     """
     import re
 
     # Remove ALL whitespace (spaces, tabs, newlines, etc.)
-    # This handles cases where base64 might be split across lines or have embedded spaces
     data = re.sub(r'\s+', '', data)
 
-    # Validate that string only contains valid base64 characters
-    # Valid: A-Z, a-z, 0-9, +, /, = (padding)
-    if not re.match(r'^[A-Za-z0-9+/]*=*$', data):
-        # Find invalid characters for debugging
-        invalid_chars = set(re.findall(r'[^A-Za-z0-9+/=]', data))
-        log.error(f"Base64 decode failed - Invalid characters found: {invalid_chars}")
-        log.error(f"Data length: {len(data)}, First 100 chars: {data[:100]}")
-        raise ValueError(f"Invalid base64 characters: {invalid_chars}")
+    # Detect format: hex-encoded (starts with \x) or base64
+    if data.startswith('\\x') or '\\x' in data[:20]:
+        # Hex-encoded format from Supabase BYTEA
+        log.debug(f"Detected hex-encoded data (length: {len(data)})")
+        try:
+            # Parse hex string with \xHH format
+            # Replace \x with nothing and decode pairs of hex digits
+            hex_str = data.replace('\\x', '')
 
-    # Add padding if needed
-    missing_padding = len(data) % 4
-    if missing_padding:
-        data += '=' * (4 - missing_padding)
-        log.debug(f"Added {4 - missing_padding} padding characters to base64 string")
+            # Validate it's valid hex
+            if not re.match(r'^[0-9a-fA-F]*$', hex_str):
+                invalid_chars = set(re.findall(r'[^0-9a-fA-F]', hex_str))
+                log.error(f"Invalid hex characters: {invalid_chars}")
+                raise ValueError(f"Invalid hex characters: {invalid_chars}")
 
-    try:
-        return base64.b64decode(data)
-    except Exception as e:
-        # Detailed error logging for debugging
-        log.error(f"Base64 decode failed after validation and padding")
-        log.error(f"Data length: {len(data)} (multiple of 4: {len(data) % 4 == 0})")
-        log.error(f"First 100 chars: {data[:100]}")
-        log.error(f"Last 20 chars: {data[-20:] if len(data) > 20 else data}")
-        log.error(f"Error type: {type(e).__name__}, Message: {str(e)}")
-        raise
+            # Decode hex to bytes
+            result = bytes.fromhex(hex_str)
+            log.debug(f"Successfully decoded {len(hex_str)} hex chars to {len(result)} bytes")
+            return result
+
+        except Exception as e:
+            log.error(f"Hex decode failed")
+            log.error(f"Data length: {len(data)}, First 100 chars: {data[:100]}")
+            log.error(f"Error type: {type(e).__name__}, Message: {str(e)}")
+            raise
+
+    else:
+        # Base64-encoded format
+        log.debug(f"Detected base64-encoded data (length: {len(data)})")
+
+        # Validate that string only contains valid base64 characters
+        # Valid: A-Z, a-z, 0-9, +, /, = (padding)
+        if not re.match(r'^[A-Za-z0-9+/]*=*$', data):
+            # Find invalid characters for debugging
+            invalid_chars = set(re.findall(r'[^A-Za-z0-9+/=]', data))
+            log.error(f"Base64 decode failed - Invalid characters found: {invalid_chars}")
+            log.error(f"Data length: {len(data)}, First 100 chars: {data[:100]}")
+            raise ValueError(f"Invalid base64 characters: {invalid_chars}")
+
+        # Add padding if needed (must be multiple of 4)
+        missing_padding = len(data) % 4
+        if missing_padding:
+            data += '=' * (4 - missing_padding)
+            log.debug(f"Added {4 - missing_padding} padding characters to base64 string")
+
+        try:
+            result = base64.b64decode(data)
+            log.debug(f"Successfully decoded {len(data)} base64 chars to {len(result)} bytes")
+            return result
+        except Exception as e:
+            # Detailed error logging for debugging
+            log.error(f"Base64 decode failed after validation and padding")
+            log.error(f"Data length: {len(data)} (multiple of 4: {len(data) % 4 == 0})")
+            log.error(f"First 100 chars: {data[:100]}")
+            log.error(f"Last 20 chars: {data[-20:] if len(data) > 20 else data}")
+            log.error(f"Error type: {type(e).__name__}, Message: {str(e)}")
+            raise
 
 
 # Import new v2 endpoints

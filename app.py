@@ -451,8 +451,8 @@ async def upload_base_resume(
         # Immediately verify what was stored
         verify = supabase.table("user_base_resumes").select("file_data").eq("user_id", user_id).execute()
         if verify.data:
-            stored_data_b64 = verify.data[0]["file_data"]
-            stored_data = decode_base64(stored_data_b64)
+            stored_data_hex = verify.data[0]["file_data"]
+            stored_data = decode_base64(stored_data_hex)
             log.info(f"Verify - Stored data length: {len(stored_data)} bytes")
             log.info(f"Verify - Match original: {stored_data == file_content}")
             if stored_data != file_content:
@@ -598,9 +598,9 @@ async def match_bullets_for_job(
                     detail="No resume file provided and no base resume found. Please upload a resume or set a base resume."
                 )
 
-            # Decode base64 string from BYTEA column to get raw bytes
-            content_b64 = result.data[0]["file_data"]
-            content = decode_base64(content_b64)
+            # Decode hex-encoded data from BYTEA column to get raw bytes
+            content_hex = result.data[0]["file_data"]
+            content = decode_base64(content_hex)
 
             # Log the retrieval for debugging
             log.info(f"Retrieval - Data length: {len(content)} bytes")
@@ -812,7 +812,7 @@ async def download_resume(
             ).eq("session_id", session_id).execute()
 
             if result.data and len(result.data) > 0:
-                # Decode from base64
+                # Decode hex-encoded session resume
                 raw = decode_base64(result.data[0]["resume_data"])
                 file_name = result.data[0]["resume_name"]
                 log.info(f"Loaded session resume: {file_name}")
@@ -829,8 +829,8 @@ async def download_resume(
                         detail="Session resume not found and no base resume exists. Please upload a resume."
                     )
 
-                # Get raw bytes from BYTEA column
-                raw = result.data[0]["file_data"]
+                # Decode hex-encoded data from BYTEA column
+                raw = decode_base64(result.data[0]["file_data"])
                 file_name = result.data[0]["file_name"]
                 log.info(f"Loaded base resume: {file_name}")
         else:
@@ -848,7 +848,7 @@ async def download_resume(
                     detail="No resume file, session, or base resume found. Please upload a resume."
                 )
 
-            # Decode from base64
+            # Decode hex-encoded base resume
             raw = decode_base64(result.data[0]["file_data"])
             file_name = result.data[0]["file_name"]
             log.info(f"Loaded base resume: {file_name}")

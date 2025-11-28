@@ -14,17 +14,21 @@ from db_utils import (create_qa_session, get_qa_session, store_qa_pair, update_q
                       update_session_status, get_answered_qa_pairs)
 
 
-# Helper function for robust base64/hex decoding
+# Helper function for robust hex/base64 decoding
 def decode_base64(data: str) -> bytes:
     """
-    Decode base64 or hex-encoded string with comprehensive error handling.
+    Decode hex or base64-encoded string with comprehensive error handling.
+
+    Primary format: Hex-encoded (consistent with Supabase BYTEA storage/retrieval)
+    Fallback format: Base64-encoded (for backward compatibility)
 
     This function provides bulletproof decoding for data retrieved from
-    Supabase BYTEA columns, which may be returned as base64 OR hex-encoded.
+    Supabase BYTEA columns. All resume data is now stored as hex-encoded
+    for consistency with Supabase's native BYTEA return format.
 
     Handles:
-    - Hex-encoded format (e.g., "\\x504b03..." from Supabase BYTEA)
-    - Base64-encoded format (e.g., "UEsDBB..." standard base64)
+    - Hex-encoded format (PRIMARY): "\\x504b03..." - PostgreSQL hex format
+    - Base64-encoded format (FALLBACK): "UEsDBB..." - for legacy data
     - Invalid padding (not multiple of 4) - automatically adds '=' padding
     - Embedded whitespace (newlines, tabs, spaces) - strips all whitespace
     - Leading/trailing whitespace - removed
@@ -45,16 +49,17 @@ def decode_base64(data: str) -> bytes:
         - v2: Added automatic padding (fixes "not multiple of 4" error)
         - v3: Added comprehensive whitespace removal and character validation
         - v4: Added hex-encoding support for Supabase BYTEA columns
+        - v5: Switched to hex-encoding as primary format throughout application
     """
     import re
 
     # Remove ALL whitespace (spaces, tabs, newlines, etc.)
     data = re.sub(r'\s+', '', data)
 
-    # Detect format: hex-encoded (starts with \x) or base64
+    # Detect format: hex-encoded (PRIMARY) or base64 (FALLBACK)
     if data.startswith('\\x') or '\\x' in data[:20]:
-        # Hex-encoded format from Supabase BYTEA
-        log.debug(f"Detected hex-encoded data (length: {len(data)})")
+        # Hex-encoded format - PRIMARY/EXPECTED format for all resume storage
+        log.debug(f"Decoding hex-encoded data (length: {len(data)} chars)")
         try:
             # Parse hex string with \xHH format
             # Replace \x with nothing and decode pairs of hex digits
@@ -78,8 +83,8 @@ def decode_base64(data: str) -> bytes:
             raise
 
     else:
-        # Base64-encoded format
-        log.debug(f"Detected base64-encoded data (length: {len(data)})")
+        # Base64-encoded format - FALLBACK for legacy data or edge cases
+        log.info(f"Decoding base64-encoded data (length: {len(data)} chars) - legacy format")
 
         # Validate that string only contains valid base64 characters
         # Valid: A-Z, a-z, 0-9, +, /, = (padding)
@@ -424,15 +429,15 @@ async def upload_base_resume(
             log.exception("Invalid DOCX file")
             raise HTTPException(status_code=400, detail=f"Invalid DOCX file: {str(e)}")
 
-        # Base64-encode bytes for BYTEA column storage
+        # Hex-encode bytes for BYTEA column storage (consistent with Supabase return format)
         log.info(f"Upload - File size: {len(file_content)} bytes")
-        file_data_b64 = base64.b64encode(file_content).decode('utf-8')
+        file_data_hex = '\\x' + file_content.hex()
 
         # Store in database (upsert)
         data = {
             "user_id": user_id,
             "file_name": file_name,
-            "file_data": file_data_b64,  # Store base64-encoded string
+            "file_data": file_data_hex,  # Store hex-encoded string
             "updated_at": "now()"
         }
 
@@ -567,13 +572,13 @@ async def match_bullets_for_job(
                 raise HTTPException(status_code=503, detail="Supabase not configured")
 
             try:
-                # Encode as base64 for storage
-                content_b64 = base64.b64encode(content).decode('utf-8')
+                # Encode as hex for storage (consistent with base resume format)
+                content_hex = '\\x' + content.hex()
 
                 supabase.table("job_application_sessions").insert({
                     "user_id": user_id,
                     "session_id": session_id,
-                    "resume_data": content_b64,
+                    "resume_data": content_hex,
                     "resume_name": resume_name
                 }).execute()
                 log.info(f"Stored session resume for session {session_id}")

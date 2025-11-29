@@ -743,41 +743,39 @@ def generate_bullet_with_facts(original_bullet: str, job_description: str,
     log.info(f"  → Taking WITH-FACTS path (rich optimization)")
     log.debug(f"  Facts text length: {len(facts_text)} chars")
 
-    prompt = f"""You are a professional resume writer. Rewrite this bullet using the provided facts and tailoring it to the job description.
+    prompt = f"""You are a professional resume writer creating a new, optimized bullet point.
 
-ORIGINAL BULLET:
-{original_bullet}
+            Your task: Construct a compelling bullet from scratch using the verified facts below, optimized for the target job description. The original bullet is provided only as context for what experience this covers—do not simply edit it.
 
-TARGET JOB DESCRIPTION:
-{job_description}
+            TARGET JOB DESCRIPTION:
+            {job_description}
 
-VERIFIED FACTS ABOUT THIS EXPERIENCE:
-{facts_text}
+            VERIFIED FACTS TO USE:
+            {facts_text}
 
-REWRITING GUIDELINES:
-• Use impact-driven formats inspired by Google XYZ (but vary the structure for uniqueness):
-  Examples:
-  - "[Action] [X] resulting in [Y]"
-  - "[Action] [X], achieving [Y]"
-  - "[Action] [X] by doing [Z]"
-  - "[Action] [X] to drive [Y]"
-  - "[Action] [X], improving [Y] by [Z]"
-  - "[Action] [X] through [Z], delivering [Y]"
+            ORIGINAL BULLET (for context only—rewrite from scratch):
+            {original_bullet}
 
-  AVOID using "as measured by" in every bullet - use natural language variations
+            CONSTRUCTION APPROACH:
+            1. Identify which facts best align with the job description's priorities
+            2. Select an action verb that matches JD language and accurately describes the work
+            3. Build a new bullet that leads with impact and includes concrete metrics
+            4. Structure it to emphasize what this employer would care about most
 
-• Start with strong, impactful action verbs that match the job description
-  Examples: Led, Developed, Engineered, Optimized, Architected, Drove, Delivered, Built, Designed, Implemented, Spearheaded
-  (Choose the verb that best fits the accomplishment AND aligns with JD language)
+            STRUCTURAL OPTIONS (vary these):
+            - "[Action] [what you did] resulting in [measurable outcome]"
+            - "[Action] [scope/scale], achieving [result] through [method]"
+            - "[Action] [what] by [how], driving [business impact]"
+            - "[Action] [outcome] for [stakeholder] by [method]"
 
-• Incorporate specific metrics and achievements from the facts
-• Align with the job description's requirements and terminology
-• Preserve ownership language and demonstrate impact
-• Keep it concise, powerful, and unique
-• Use variety in structure - don't make all bullets sound the same
-• DO NOT add information not present in the facts{char_limit_text}
+            REQUIREMENTS:
+            - Must incorporate specific metrics from the facts
+            - Must use terminology that mirrors the job description
+            - Must sound distinct from a generic template
+            - Keep to a single, powerful sentence
+            {char_limit_text}
 
-Return ONLY the rewritten bullet, no commentary or explanation."""
+            Return ONLY the new bullet."""
 
     log.debug(f"  Calling OpenAI with temperature=0.4 for variety")
     r = client.chat.completions.create(

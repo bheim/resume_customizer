@@ -742,8 +742,32 @@ async def generate_resume_with_facts(request: BulletGenerationRequest):
 
         log.info(f"Generated {with_facts_count} bullets with facts, {without_facts_count} without facts")
 
+        # Calculate LLM scores for before/after comparison
+        original_resume_text = "\n".join([b["original"] for b in enhanced_bullets])
+        enhanced_resume_text = "\n".join([b["enhanced"] for b in enhanced_bullets])
+
+        try:
+            from llm_utils import llm_fit_score
+
+            log.info("Calculating LLM scores for before/after comparison")
+            score_before = llm_fit_score(original_resume_text, request.job_description)
+            score_after = llm_fit_score(enhanced_resume_text, request.job_description)
+            improvement = score_after - score_before
+
+            log.info(f"LLM Score - Before: {score_before}, After: {score_after}, Improvement: {improvement:+.1f}")
+
+            scores = {
+                "before": round(score_before, 1),
+                "after": round(score_after, 1),
+                "improvement": round(improvement, 1)
+            }
+        except Exception as e:
+            log.warning(f"Failed to calculate LLM scores: {e}")
+            scores = None
+
         return {
-            "enhanced_bullets": enhanced_bullets
+            "enhanced_bullets": enhanced_bullets,
+            "scores": scores
         }
 
     except Exception as e:

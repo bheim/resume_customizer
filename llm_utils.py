@@ -968,12 +968,18 @@ REWRITING GUIDELINES:
      - Specifically mentioned in the job description, OR
      - Highly specialized/impressive for the role
      - Generic phrases like "statistical methods" add no value - cut them
-   • Avoid vague process language at the end ("enabling X", "supporting Y", "driving Z")
-   • End with concrete outcomes or specific value delivered, not abstract process descriptions
 
-   Example of cutting unnecessary details:
-   ❌ "Led comprehensive analysis utilizing SQL and statistical methods to identify a $200M opportunity through data-driven insights"
-   ✅ "Led market analysis using SQL, identifying a $200M expansion opportunity"
+   END ON THE STRONGEST POINT:
+   • Bullets should end with the most impactful element - usually the quantified result
+   • After stating the concrete outcome, STOP
+   • Don't add trailing "through X" or "via Y" or "derived from Z" clauses
+   • These explanatory tails weaken the ending and add no concrete value
+
+   Example:
+   ❌ "Reduced costs by 40% through rigorous process optimization and strategic vendor negotiations"
+   ✅ "Reduced costs by 40% through vendor renegotiation"
+
+   The result (40% reduction) is the punch line - end there or immediately after the key method.
 
 5. STRUCTURE VARIETY - Use different formats across bullets:
    • "[Action] [X] resulting in [Y]"

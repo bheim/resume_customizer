@@ -742,27 +742,27 @@ async def generate_resume_with_facts(request: BulletGenerationRequest):
 
         log.info(f"Generated {with_facts_count} bullets with facts, {without_facts_count} without facts")
 
-        # Calculate LLM scores for before/after comparison
-        original_resume_text = "\n".join([b["original"] for b in enhanced_bullets])
-        enhanced_resume_text = "\n".join([b["enhanced"] for b in enhanced_bullets])
-
+        # Calculate comparative LLM scores for before/after evaluation
         try:
-            from llm_utils import llm_fit_score
+            from llm_utils import llm_comparative_score
 
-            log.info("Calculating LLM scores for before/after comparison")
-            score_before = llm_fit_score(original_resume_text, request.job_description)
-            score_after = llm_fit_score(enhanced_resume_text, request.job_description)
-            improvement = score_after - score_before
+            log.info("Calculating comparative LLM scores for before/after evaluation")
 
-            log.info(f"LLM Score - Before: {score_before}, After: {score_after}, Improvement: {improvement:+.1f}")
+            # Extract bullet lists for comparative scoring
+            original_bullets = [b["original"] for b in enhanced_bullets]
+            enhanced_bullets_list = [b["enhanced"] for b in enhanced_bullets]
 
-            scores = {
-                "before": round(score_before, 1),
-                "after": round(score_after, 1),
-                "improvement": round(improvement, 1)
-            }
+            # Get comparative scores with dimension breakdowns
+            scores = llm_comparative_score(
+                original_bullets,
+                enhanced_bullets_list,
+                request.job_description
+            )
+
+            log.info(f"Comparative Score - Before: {scores['before_score']}, After: {scores['after_score']}, Improvement: {scores['improvement']:+.1f}")
+
         except Exception as e:
-            log.warning(f"Failed to calculate LLM scores: {e}")
+            log.warning(f"Failed to calculate comparative LLM scores: {e}")
             scores = None
 
         return {

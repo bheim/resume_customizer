@@ -90,6 +90,212 @@ RESUME:
     val = max(0, min(100, int(m.group(1))))
     return float(val)
 
+
+def llm_comparative_score(original_bullets: List[str], enhanced_bullets: List[str], jd_text: str) -> Dict:
+    """
+    Comparative LLM grading of original vs enhanced resume bullets.
+
+    Evaluates both sets of bullets independently as a hiring manager on 5 dimensions:
+    - Relevance to JD (30% weight)
+    - Specificity & Impact (25% weight)
+    - Language Strength (20% weight)
+    - ATS Alignment (15% weight)
+    - Overall Impression (10% weight)
+
+    Args:
+        original_bullets: List of original resume bullets
+        enhanced_bullets: List of enhanced resume bullets
+        jd_text: Job description text
+
+    Returns:
+        Dict with before_score, after_score, improvement, and dimension breakdowns:
+        {
+            "before_score": 67.5,
+            "after_score": 84.0,
+            "improvement": 16.5,
+            "dimensions": {
+                "before": {"relevance": 7, "specificity": 6, "language": 7, "ats": 6, "overall": 7},
+                "after": {"relevance": 9, "specificity": 8, "language": 9, "ats": 8, "overall": 8}
+            }
+        }
+    """
+    if not client:
+        return {
+            "before_score": 0.0,
+            "after_score": 0.0,
+            "improvement": 0.0,
+            "dimensions": {
+                "before": {"relevance": 0, "specificity": 0, "language": 0, "ats": 0, "overall": 0},
+                "after": {"relevance": 0, "specificity": 0, "language": 0, "ats": 0, "overall": 0}
+            }
+        }
+
+    # Format bullets for evaluation
+    original_text = "\n".join([f"• {b}" for b in original_bullets])
+    enhanced_text = "\n".join([f"• {b}" for b in enhanced_bullets])
+
+    # Randomize which set is presented as "Set A" vs "Set B" to avoid bias
+    import random
+    is_original_first = random.choice([True, False])
+    set_a = original_text if is_original_first else enhanced_text
+    set_b = enhanced_text if is_original_first else original_text
+
+    prompt = f"""You are a hiring manager evaluating resume bullets for this position. You will review two anonymized sets of resume bullets and score each independently.
+
+JOB DESCRIPTION:
+{jd_text}
+
+---
+
+SET A:
+{set_a}
+
+SET B:
+{set_b}
+
+---
+
+EVALUATION TASK:
+Evaluate each set independently on these 5 dimensions (score 1-10 for each):
+
+1. **Relevance to Job Requirements** (1-10)
+   - How well do the bullets align with the specific skills, technologies, and responsibilities in the JD?
+   - Do they address the core competencies needed for this role?
+
+2. **Specificity & Impact** (1-10)
+   - Are accomplishments quantified with metrics, percentages, or concrete outcomes?
+   - Is the scope and scale clear (team size, budget, timeline)?
+   - Do they demonstrate measurable business impact?
+
+3. **Language Strength** (1-10)
+   - Strong action verbs and professional tone?
+   - Clear, concise, and compelling writing?
+   - Demonstrates ownership and initiative?
+
+4. **ATS Optimization** (1-10)
+   - Uses relevant keywords from the job description?
+   - Includes specific technologies, tools, and methodologies mentioned in JD?
+   - Formatted for applicant tracking system parsing?
+
+5. **Overall Impression** (1-10)
+   - Would this candidate get an interview based on these bullets?
+   - Do the bullets tell a compelling career story?
+   - Overall professionalism and quality?
+
+---
+
+SCORING WEIGHTS (for reference):
+- Relevance: 30%
+- Specificity & Impact: 25%
+- Language Strength: 20%
+- ATS Alignment: 15%
+- Overall Impression: 10%
+
+---
+
+OUTPUT FORMAT:
+Return ONLY valid JSON in this exact format (no commentary, no code fences):
+
+{{
+  "set_a": {{
+    "relevance": 8,
+    "specificity": 7,
+    "language": 8,
+    "ats": 7,
+    "overall": 8
+  }},
+  "set_b": {{
+    "relevance": 9,
+    "specificity": 9,
+    "language": 9,
+    "ats": 8,
+    "overall": 9
+  }}
+}}
+
+Evaluate objectively and independently. Each dimension should be scored 1-10."""
+
+    try:
+        r = client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0  # Deterministic for consistent grading
+        )
+
+        raw = (r.choices[0].message.content or "").strip()
+
+        # Clean potential code fences
+        if raw.startswith("```"):
+            raw = raw.strip("`")
+            raw = re.sub(r"^\s*json", "", raw, flags=re.I).strip()
+
+        scores = loads(raw)
+
+        # Extract dimension scores
+        set_a_scores = scores.get("set_a", {})
+        set_b_scores = scores.get("set_b", {})
+
+        # Calculate weighted totals (0-100 scale)
+        def calculate_weighted_score(dims: Dict) -> float:
+            relevance = dims.get("relevance", 0)
+            specificity = dims.get("specificity", 0)
+            language = dims.get("language", 0)
+            ats = dims.get("ats", 0)
+            overall = dims.get("overall", 0)
+
+            # Weighted sum: each dimension is 1-10, convert to 0-100 scale
+            weighted = (
+                relevance * 0.30 +
+                specificity * 0.25 +
+                language * 0.20 +
+                ats * 0.15 +
+                overall * 0.10
+            )
+            return weighted * 10  # Convert to 0-100 scale
+
+        set_a_total = calculate_weighted_score(set_a_scores)
+        set_b_total = calculate_weighted_score(set_b_scores)
+
+        # Map back to original/enhanced based on randomization
+        if is_original_first:
+            before_score = set_a_total
+            after_score = set_b_total
+            before_dims = set_a_scores
+            after_dims = set_b_scores
+        else:
+            before_score = set_b_total
+            after_score = set_a_total
+            before_dims = set_b_scores
+            after_dims = set_a_scores
+
+        improvement = after_score - before_score
+
+        result = {
+            "before_score": round(before_score, 1),
+            "after_score": round(after_score, 1),
+            "improvement": round(improvement, 1),
+            "dimensions": {
+                "before": before_dims,
+                "after": after_dims
+            }
+        }
+
+        log.info(f"Comparative scoring: before={result['before_score']}, after={result['after_score']}, improvement={result['improvement']}")
+        return result
+
+    except Exception as e:
+        log.exception(f"Error in comparative scoring: {e}")
+        # Return neutral scores on error
+        return {
+            "before_score": 0.0,
+            "after_score": 0.0,
+            "improvement": 0.0,
+            "dimensions": {
+                "before": {"relevance": 0, "specificity": 0, "language": 0, "ats": 0, "overall": 0},
+                "after": {"relevance": 0, "specificity": 0, "language": 0, "ats": 0, "overall": 0}
+            }
+        }
+
 def rewrite_with_openai(bullets: List[str], job_description: str) -> List[str]:
     if not client: raise RuntimeError("OPENAI_API_KEY missing")
     jd_core = llm_distill_jd(job_description) if USE_DISTILLED_JD else job_description

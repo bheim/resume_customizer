@@ -809,6 +809,11 @@ VALIDATION CHECKLIST (mentally verify before responding):
 
 Return ONLY the optimized bullet text. No explanations, no commentary."""
 
+    # Log the full prompt so it's visible in logs
+    log.info(f"  ===== NO-FACTS PROMPT START =====")
+    log.info(prompt)
+    log.info(f"  ===== NO-FACTS PROMPT END =====")
+
     try:
         log.debug(f"  Calling OpenAI with temperature=0.3")
         response = client.chat.completions.create(
@@ -984,6 +989,11 @@ REWRITING GUIDELINES:
 • DO NOT add information not present in the facts{char_limit_text}
 
 Return ONLY the rewritten bullet, no commentary or explanation."""
+
+    # Log the full prompt so it's visible in logs
+    log.info(f"  ===== WITH-FACTS PROMPT START =====")
+    log.info(prompt)
+    log.info(f"  ===== WITH-FACTS PROMPT END =====")
 
     log.debug(f"  Calling OpenAI with temperature=0.4 for variety")
     r = client.chat.completions.create(

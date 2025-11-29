@@ -809,11 +809,6 @@ VALIDATION CHECKLIST (mentally verify before responding):
 
 Return ONLY the optimized bullet text. No explanations, no commentary."""
 
-    # Log the full prompt so it's visible in logs
-    log.info(f"  ===== NO-FACTS PROMPT START =====")
-    log.info(prompt)
-    log.info(f"  ===== NO-FACTS PROMPT END =====")
-
     try:
         log.debug(f"  Calling OpenAI with temperature=0.3")
         response = client.chat.completions.create(

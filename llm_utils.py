@@ -944,27 +944,38 @@ VERIFIED FACTS ABOUT THIS EXPERIENCE:
 {facts_text}
 
 REWRITING GUIDELINES:
-• Use impact-driven formats inspired by Google XYZ (but vary the structure for uniqueness):
-  Examples:
-  - "[Action] [X] resulting in [Y]"
-  - "[Action] [X], achieving [Y]"
-  - "[Action] [X] by doing [Z]"
-  - "[Action] [X] to drive [Y]"
-  - "[Action] [X], improving [Y] by [Z]"
-  - "[Action] [X] through [Z], delivering [Y]"
 
-  AVOID using "as measured by" in every bullet - use natural language variations
+1. ACTION VERBS - Preserve or strengthen ownership language:
+   • If the original verb shows creation/leadership (Developed, Led, Built, Architected, Designed), keep it or use an equally strong verb
+   • Don't weaken "Developed" → "Streamlined" or "Led" → "Supported"
+   • Strong verbs: Led, Developed, Engineered, Optimized, Architected, Drove, Delivered, Built, Designed, Implemented, Spearheaded, Created
+   • Choose verbs that match the job description's language while maintaining ownership
 
-• Start with strong, impactful action verbs that match the job description
-  Examples: Led, Developed, Engineered, Optimized, Architected, Drove, Delivered, Built, Designed, Implemented, Spearheaded
-  (Choose the verb that best fits the accomplishment AND aligns with JD language)
+2. FACT SELECTION - Quality over quantity:
+   • Select the 1-2 most impressive, relevant facts
+   • Don't try to incorporate every detail - one powerful metric beats three mediocre ones
+   • If a fact doesn't fit naturally in a concise bullet, drop it
 
-• Incorporate specific metrics and achievements from the facts
-• Align with the job description's requirements and terminology
-• Preserve ownership language and demonstrate impact
-• Keep it concise, powerful, and unique
-• Use variety in structure - don't make all bullets sound the same
-• DO NOT add information not present in the facts{char_limit_text}
+3. METRIC CLARITY - State each metric once in its most compelling form:
+   • Don't restate the same achievement multiple ways
+   • Choose the most impactful representation
+
+4. CONCISENESS - Every word must earn its place:
+   • Cut ruthlessly - aim for maximum impact in minimum words
+   • Avoid vague process language at the end ("enabling X", "supporting Y", "driving Z")
+   • End with concrete outcomes or specific value delivered, not abstract process descriptions
+
+5. STRUCTURE VARIETY - Use different formats across bullets:
+   • "[Action] [X] resulting in [Y]"
+   • "[Action] [X], achieving [Y]"
+   • "[Action] [X] by doing [Z]"
+   • "[Action] [X] to [concrete outcome]"
+   • "[Action] [X] through [Z], delivering [Y]"
+   • Vary structure - don't make all bullets sound the same
+
+6. ALIGNMENT - Match job description requirements and terminology
+
+7. DO NOT add information not present in the facts above{char_limit_text}
 
 Return ONLY the rewritten bullet, no commentary or explanation."""
 

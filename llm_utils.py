@@ -961,8 +961,19 @@ REWRITING GUIDELINES:
 
 4. CONCISENESS - Every word must earn its place:
    • Cut ruthlessly - aim for maximum impact in minimum words
+   • Remove descriptive filler: "comprehensive", "utilizing", "leveraging", "extensive"
+   • Don't explain the obvious: if you analyzed data, skip "through data-driven insights"
+   • Each detail must pass the "so what?" test - does it make the achievement more impressive, or just longer?
+   • Technical details (tools/methods) should only be included if:
+     - Specifically mentioned in the job description, OR
+     - Highly specialized/impressive for the role
+     - Generic phrases like "statistical methods" add no value - cut them
    • Avoid vague process language at the end ("enabling X", "supporting Y", "driving Z")
    • End with concrete outcomes or specific value delivered, not abstract process descriptions
+
+   Example of cutting unnecessary details:
+   ❌ "Led comprehensive analysis utilizing SQL and statistical methods to identify a $200M opportunity through data-driven insights"
+   ✅ "Led market analysis using SQL, identifying a $200M expansion opportunity"
 
 5. STRUCTURE VARIETY - Use different formats across bullets:
    • "[Action] [X] resulting in [Y]"

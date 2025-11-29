@@ -14,66 +14,105 @@ from db_utils import (create_qa_session, get_qa_session, store_qa_pair, update_q
                       update_session_status, get_answered_qa_pairs)
 
 
-# Helper function for robust base64 decoding
+# Helper function for robust hex/base64 decoding
 def decode_base64(data: str) -> bytes:
     """
-    Decode base64 string with comprehensive error handling and automatic fixes.
+    Decode hex or base64-encoded string with comprehensive error handling.
 
-    This function provides bulletproof base64 decoding for data retrieved from
-    Supabase BYTEA columns, which may have padding issues or embedded whitespace.
+    Primary format: Hex-encoded (consistent with Supabase BYTEA storage/retrieval)
+    Fallback format: Base64-encoded (for backward compatibility)
+
+    This function provides bulletproof decoding for data retrieved from
+    Supabase BYTEA columns. All resume data is now stored as hex-encoded
+    for consistency with Supabase's native BYTEA return format.
 
     Handles:
+    - Hex-encoded format (PRIMARY): "\\x504b03..." - PostgreSQL hex format
+    - Base64-encoded format (FALLBACK): "UEsDBB..." - for legacy data
     - Invalid padding (not multiple of 4) - automatically adds '=' padding
     - Embedded whitespace (newlines, tabs, spaces) - strips all whitespace
     - Leading/trailing whitespace - removed
     - Invalid characters - validates and reports which characters are invalid
 
     Args:
-        data (str): Base64-encoded string (may contain whitespace or invalid padding)
+        data (str): Encoded string (hex or base64, may contain whitespace)
 
     Returns:
         bytes: Decoded binary data
 
     Raises:
-        ValueError: If data contains characters outside the base64 character set
-        binascii.Error: If base64 decoding fails after all fixes
+        ValueError: If data contains invalid characters for both formats
+        binascii.Error: If decoding fails after all fixes
 
     History:
-        - v1: Basic decoding with strip()
+        - v1: Basic base64 decoding with strip()
         - v2: Added automatic padding (fixes "not multiple of 4" error)
         - v3: Added comprehensive whitespace removal and character validation
+        - v4: Added hex-encoding support for Supabase BYTEA columns
+        - v5: Switched to hex-encoding as primary format throughout application
     """
     import re
 
     # Remove ALL whitespace (spaces, tabs, newlines, etc.)
-    # This handles cases where base64 might be split across lines or have embedded spaces
     data = re.sub(r'\s+', '', data)
 
-    # Validate that string only contains valid base64 characters
-    # Valid: A-Z, a-z, 0-9, +, /, = (padding)
-    if not re.match(r'^[A-Za-z0-9+/]*=*$', data):
-        # Find invalid characters for debugging
-        invalid_chars = set(re.findall(r'[^A-Za-z0-9+/=]', data))
-        log.error(f"Base64 decode failed - Invalid characters found: {invalid_chars}")
-        log.error(f"Data length: {len(data)}, First 100 chars: {data[:100]}")
-        raise ValueError(f"Invalid base64 characters: {invalid_chars}")
+    # Detect format: hex-encoded (PRIMARY) or base64 (FALLBACK)
+    if data.startswith('\\x') or '\\x' in data[:20]:
+        # Hex-encoded format - PRIMARY/EXPECTED format for all resume storage
+        log.debug(f"Decoding hex-encoded data (length: {len(data)} chars)")
+        try:
+            # Parse hex string with \xHH format
+            # Replace \x with nothing and decode pairs of hex digits
+            hex_str = data.replace('\\x', '')
 
-    # Add padding if needed
-    missing_padding = len(data) % 4
-    if missing_padding:
-        data += '=' * (4 - missing_padding)
-        log.debug(f"Added {4 - missing_padding} padding characters to base64 string")
+            # Validate it's valid hex
+            if not re.match(r'^[0-9a-fA-F]*$', hex_str):
+                invalid_chars = set(re.findall(r'[^0-9a-fA-F]', hex_str))
+                log.error(f"Invalid hex characters: {invalid_chars}")
+                raise ValueError(f"Invalid hex characters: {invalid_chars}")
 
-    try:
-        return base64.b64decode(data)
-    except Exception as e:
-        # Detailed error logging for debugging
-        log.error(f"Base64 decode failed after validation and padding")
-        log.error(f"Data length: {len(data)} (multiple of 4: {len(data) % 4 == 0})")
-        log.error(f"First 100 chars: {data[:100]}")
-        log.error(f"Last 20 chars: {data[-20:] if len(data) > 20 else data}")
-        log.error(f"Error type: {type(e).__name__}, Message: {str(e)}")
-        raise
+            # Decode hex to bytes
+            result = bytes.fromhex(hex_str)
+            log.debug(f"Successfully decoded {len(hex_str)} hex chars to {len(result)} bytes")
+            return result
+
+        except Exception as e:
+            log.error(f"Hex decode failed")
+            log.error(f"Data length: {len(data)}, First 100 chars: {data[:100]}")
+            log.error(f"Error type: {type(e).__name__}, Message: {str(e)}")
+            raise
+
+    else:
+        # Base64-encoded format - FALLBACK for legacy data or edge cases
+        log.info(f"Decoding base64-encoded data (length: {len(data)} chars) - legacy format")
+
+        # Validate that string only contains valid base64 characters
+        # Valid: A-Z, a-z, 0-9, +, /, = (padding)
+        if not re.match(r'^[A-Za-z0-9+/]*=*$', data):
+            # Find invalid characters for debugging
+            invalid_chars = set(re.findall(r'[^A-Za-z0-9+/=]', data))
+            log.error(f"Base64 decode failed - Invalid characters found: {invalid_chars}")
+            log.error(f"Data length: {len(data)}, First 100 chars: {data[:100]}")
+            raise ValueError(f"Invalid base64 characters: {invalid_chars}")
+
+        # Add padding if needed (must be multiple of 4)
+        missing_padding = len(data) % 4
+        if missing_padding:
+            data += '=' * (4 - missing_padding)
+            log.debug(f"Added {4 - missing_padding} padding characters to base64 string")
+
+        try:
+            result = base64.b64decode(data)
+            log.debug(f"Successfully decoded {len(data)} base64 chars to {len(result)} bytes")
+            return result
+        except Exception as e:
+            # Detailed error logging for debugging
+            log.error(f"Base64 decode failed after validation and padding")
+            log.error(f"Data length: {len(data)} (multiple of 4: {len(data) % 4 == 0})")
+            log.error(f"First 100 chars: {data[:100]}")
+            log.error(f"Last 20 chars: {data[-20:] if len(data) > 20 else data}")
+            log.error(f"Error type: {type(e).__name__}, Message: {str(e)}")
+            raise
 
 
 # Import new v2 endpoints
@@ -390,15 +429,15 @@ async def upload_base_resume(
             log.exception("Invalid DOCX file")
             raise HTTPException(status_code=400, detail=f"Invalid DOCX file: {str(e)}")
 
-        # Base64-encode bytes for BYTEA column storage
+        # Hex-encode bytes for BYTEA column storage (consistent with Supabase return format)
         log.info(f"Upload - File size: {len(file_content)} bytes")
-        file_data_b64 = base64.b64encode(file_content).decode('utf-8')
+        file_data_hex = '\\x' + file_content.hex()
 
         # Store in database (upsert)
         data = {
             "user_id": user_id,
             "file_name": file_name,
-            "file_data": file_data_b64,  # Store base64-encoded string
+            "file_data": file_data_hex,  # Store hex-encoded string
             "updated_at": "now()"
         }
 
@@ -412,8 +451,8 @@ async def upload_base_resume(
         # Immediately verify what was stored
         verify = supabase.table("user_base_resumes").select("file_data").eq("user_id", user_id).execute()
         if verify.data:
-            stored_data_b64 = verify.data[0]["file_data"]
-            stored_data = decode_base64(stored_data_b64)
+            stored_data_hex = verify.data[0]["file_data"]
+            stored_data = decode_base64(stored_data_hex)
             log.info(f"Verify - Stored data length: {len(stored_data)} bytes")
             log.info(f"Verify - Match original: {stored_data == file_content}")
             if stored_data != file_content:
@@ -533,13 +572,13 @@ async def match_bullets_for_job(
                 raise HTTPException(status_code=503, detail="Supabase not configured")
 
             try:
-                # Encode as base64 for storage
-                content_b64 = base64.b64encode(content).decode('utf-8')
+                # Encode as hex for storage (consistent with base resume format)
+                content_hex = '\\x' + content.hex()
 
                 supabase.table("job_application_sessions").insert({
                     "user_id": user_id,
                     "session_id": session_id,
-                    "resume_data": content_b64,
+                    "resume_data": content_hex,
                     "resume_name": resume_name
                 }).execute()
                 log.info(f"Stored session resume for session {session_id}")
@@ -559,9 +598,9 @@ async def match_bullets_for_job(
                     detail="No resume file provided and no base resume found. Please upload a resume or set a base resume."
                 )
 
-            # Decode base64 string from BYTEA column to get raw bytes
-            content_b64 = result.data[0]["file_data"]
-            content = decode_base64(content_b64)
+            # Decode hex-encoded data from BYTEA column to get raw bytes
+            content_hex = result.data[0]["file_data"]
+            content = decode_base64(content_hex)
 
             # Log the retrieval for debugging
             log.info(f"Retrieval - Data length: {len(content)} bytes")
@@ -773,7 +812,7 @@ async def download_resume(
             ).eq("session_id", session_id).execute()
 
             if result.data and len(result.data) > 0:
-                # Decode from base64
+                # Decode hex-encoded session resume
                 raw = decode_base64(result.data[0]["resume_data"])
                 file_name = result.data[0]["resume_name"]
                 log.info(f"Loaded session resume: {file_name}")
@@ -790,8 +829,8 @@ async def download_resume(
                         detail="Session resume not found and no base resume exists. Please upload a resume."
                     )
 
-                # Get raw bytes from BYTEA column
-                raw = result.data[0]["file_data"]
+                # Decode hex-encoded data from BYTEA column
+                raw = decode_base64(result.data[0]["file_data"])
                 file_name = result.data[0]["file_name"]
                 log.info(f"Loaded base resume: {file_name}")
         else:
@@ -809,7 +848,7 @@ async def download_resume(
                     detail="No resume file, session, or base resume found. Please upload a resume."
                 )
 
-            # Decode from base64
+            # Decode hex-encoded base resume
             raw = decode_base64(result.data[0]["file_data"])
             file_name = result.data[0]["file_name"]
             log.info(f"Loaded base resume: {file_name}")

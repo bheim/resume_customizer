@@ -871,7 +871,7 @@ def generate_bullet_with_facts(original_bullet: str, job_description: str,
     has_meaningful_facts = bool(
         stored_facts and
         any(stored_facts.get(category) for category in
-            ["metrics", "technical_details", "impact", "context"])
+            ["tools", "skills", "actions", "results", "situation", "timeline"])
     )
 
     # Detailed logging for path detection
@@ -893,56 +893,39 @@ def generate_bullet_with_facts(original_bullet: str, job_description: str,
         return result
 
     # PATH 2: With facts - use existing fact-based generation
-    # Build facts context
+    # Build facts context from stored facts
     facts_text = ""
 
-    # Metrics
-    if stored_facts.get("metrics"):
-        metrics = stored_facts["metrics"]
-        if metrics.get("quantifiable_achievements"):
-            facts_text += "Quantifiable Achievements:\n"
-            for item in metrics["quantifiable_achievements"]:
-                facts_text += f"• {item}\n"
-        if metrics.get("scale"):
-            facts_text += "Scale/Scope:\n"
-            for item in metrics["scale"]:
+    # Format facts using the current schema (situation, actions, results, skills, tools, timeline)
+    if stored_facts.get("situation"):
+        facts_text += f"Situation/Context: {stored_facts['situation']}\n"
+
+    if stored_facts.get("actions"):
+        actions = stored_facts["actions"]
+        if isinstance(actions, list) and actions:
+            facts_text += "Actions Taken:\n"
+            for item in actions:
                 facts_text += f"• {item}\n"
 
-    # Technical details
-    if stored_facts.get("technical_details"):
-        tech = stored_facts["technical_details"]
-        if tech.get("technologies"):
-            facts_text += f"Technologies: {', '.join(tech['technologies'])}\n"
-        if tech.get("methodologies"):
-            facts_text += f"Methodologies: {', '.join(tech['methodologies'])}\n"
-
-    # Impact
-    if stored_facts.get("impact"):
-        impact = stored_facts["impact"]
-        if impact.get("business_outcomes"):
-            facts_text += "Business Impact:\n"
-            for item in impact["business_outcomes"]:
-                facts_text += f"• {item}\n"
-        if impact.get("stakeholder_value"):
-            facts_text += "Stakeholder Value:\n"
-            for item in impact["stakeholder_value"]:
+    if stored_facts.get("results"):
+        results = stored_facts["results"]
+        if isinstance(results, list) and results:
+            facts_text += "Results/Achievements:\n"
+            for item in results:
                 facts_text += f"• {item}\n"
 
-    # Context
-    if stored_facts.get("context"):
-        context = stored_facts["context"]
-        if context.get("challenges_solved"):
-            facts_text += "Challenges Solved:\n"
-            for item in context["challenges_solved"]:
-                facts_text += f"• {item}\n"
-        if context.get("scope"):
-            facts_text += "Project Scope:\n"
-            for item in context["scope"]:
-                facts_text += f"• {item}\n"
-        if context.get("role"):
-            facts_text += "Your Role:\n"
-            for item in context["role"]:
-                facts_text += f"• {item}\n"
+    if stored_facts.get("skills"):
+        skills = stored_facts["skills"]
+        if isinstance(skills, list) and skills:
+            facts_text += f"Skills: {', '.join(skills)}\n"
+
+    if stored_facts.get("tools"):
+        tools = stored_facts["tools"]
+        if isinstance(tools, list) and tools:
+            facts_text += f"Tools/Technologies: {', '.join(tools)}\n"
+
+    if stored_facts.get("timeline"):
+        facts_text += f"Timeline: {stored_facts['timeline']}\n"
 
     char_limit_text = f"\nIMPORTANT: Keep the bullet under {char_limit} characters." if char_limit else ""
 

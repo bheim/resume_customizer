@@ -932,16 +932,15 @@ def generate_bullet_with_facts(original_bullet: str, job_description: str,
     log.info(f"  → Taking WITH-FACTS path (rich optimization)")
     log.debug(f"  Facts text length: {len(facts_text)} chars")
 
-    prompt = f"""You are a professional resume writer. Rewrite this bullet using the provided facts and tailoring it to the job description.
+    prompt = f"""You are a professional resume writer creating a new, optimized bullet point.
 
-ORIGINAL BULLET:
-{original_bullet}
+            Your task: Construct a compelling bullet from scratch using the verified facts below, optimized for the target job description. The original bullet is provided only as context for what experience this covers—do not simply edit it.
 
-TARGET JOB DESCRIPTION:
-{job_description}
+            TARGET JOB DESCRIPTION:
+            {job_description}
 
-VERIFIED FACTS ABOUT THIS EXPERIENCE:
-{facts_text}
+            VERIFIED FACTS TO USE:
+            {facts_text}
 
 REWRITING GUIDELINES:
 
@@ -977,7 +976,7 @@ REWRITING GUIDELINES:
 
 7. DO NOT add information not present in the facts above{char_limit_text}
 
-Return ONLY the rewritten bullet, no commentary or explanation."""
+            Return ONLY the new bullet."""
 
     # Log the full prompt so it's visible in logs
     log.info(f"  ===== WITH-FACTS PROMPT START =====")

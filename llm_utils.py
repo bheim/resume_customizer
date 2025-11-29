@@ -531,6 +531,89 @@ IMPORTANT:
         }
 
 
+def _generate_bullet_without_facts(original_bullet: str, job_description: str,
+                                   char_limit: Optional[int] = None) -> str:
+    """
+    Conservative bullet optimization WITHOUT stored facts.
+
+    ANTI-HALLUCINATION STRATEGY:
+    - Preserves ALL original information exactly
+    - Only modifies: action verbs, structure, keyword alignment
+    - Forbidden: Adding metrics, technologies, or any new details
+    - Multiple validation layers in prompt to prevent invention
+
+    This ensures bullets without context still get optimized for the JD
+    while maintaining 100% factual accuracy to the original.
+    """
+    char_limit_text = (
+        f"\n\nCHARACTER LIMIT: Keep the bullet under {char_limit} characters."
+        if char_limit else ""
+    )
+
+    prompt = f"""You are a professional resume writer. Optimize this bullet for the target job description.
+
+⚠️  CRITICAL ANTI-HALLUCINATION RULES - STRICTLY ENFORCED:
+
+1. PRESERVE EVERYTHING: Keep every metric, number, percentage, timeframe, technology, tool, and detail EXACTLY as stated in the original
+2. ZERO ADDITIONS: Do NOT add any metrics, technologies, team sizes, timeframes, or accomplishments not explicitly in the original
+3. ZERO INVENTIONS: Do NOT make up numbers, percentages, outcomes, or specifics of any kind
+4. FACT-CHECK YOURSELF: Every claim in your output must have a direct source in the original bullet
+
+✅ WHAT YOU CAN DO (Surface-level optimization only):
+• Strengthen action verbs to match job description tone (e.g., "worked on" → "developed")
+• Restructure to Google XYZ format: [Action verb] [X] as measured by [Y] by doing [Z]
+• Align terminology with job description keywords (keep meaning identical)
+• Improve readability and flow
+• Reorder information for impact
+
+❌ WHAT YOU ABSOLUTELY CANNOT DO:
+• Add metrics not in original (team size, percentages, numbers, timeframes)
+• Add technologies or tools not mentioned
+• Add scope details or project specifics
+• Invent accomplishments or outcomes
+• Embellish or exaggerate existing facts
+• Add implied information - only use what's explicitly stated
+
+ORIGINAL BULLET (this is your ONLY source of truth):
+{original_bullet}
+
+TARGET JOB DESCRIPTION (for keyword alignment only):
+{job_description}{char_limit_text}
+
+VALIDATION CHECKLIST (mentally verify before responding):
+□ Every number in output appears in original?
+□ Every technology in output appears in original?
+□ Every metric in output appears in original?
+□ Every claim can be traced to original?
+
+Return ONLY the optimized bullet text. No explanations, no commentary.
+
+If the original is already well-written and you cannot improve it WITHOUT adding information, return it unchanged or with minimal rephrasing."""
+
+    try:
+        response = client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0  # Deterministic output
+        )
+        enhanced = response.choices[0].message.content.strip()
+
+        # Post-processing validation: log if output seems suspiciously longer
+        if len(enhanced) > len(original_bullet) * 1.5:
+            log.warning(
+                f"No-facts optimization increased length significantly. "
+                f"Original: {len(original_bullet)} chars, Enhanced: {len(enhanced)} chars. "
+                f"Potential hallucination risk."
+            )
+
+        return enhanced
+
+    except Exception as e:
+        log.exception(f"Error in no-facts bullet generation: {e}")
+        # Fallback: return original if generation fails
+        return original_bullet
+
+
 def generate_bullet_with_facts(original_bullet: str, job_description: str,
                                stored_facts: Dict, char_limit: Optional[int] = None) -> str:
     """
@@ -538,10 +621,14 @@ def generate_bullet_with_facts(original_bullet: str, job_description: str,
 
     This is the optimized generation flow that uses pre-extracted, user-confirmed facts.
 
+    Two optimization paths:
+    1. WITH FACTS: Uses stored facts to enhance with specific details
+    2. WITHOUT FACTS: Conservative optimization preserving ALL original information
+
     Args:
         original_bullet: The original bullet text
         job_description: Target job description
-        stored_facts: Structured facts from extract_facts_from_qa()
+        stored_facts: Structured facts from extract_facts_from_qa() (can be empty {})
         char_limit: Optional character limit for the bullet
 
     Returns:
@@ -550,6 +637,22 @@ def generate_bullet_with_facts(original_bullet: str, job_description: str,
     if not client:
         raise RuntimeError("OPENAI_API_KEY missing")
 
+    # Detect if we have meaningful facts
+    has_meaningful_facts = bool(
+        stored_facts and
+        any(stored_facts.get(category) for category in
+            ["metrics", "technical_details", "impact", "context"])
+    )
+
+    # PATH 1: No facts - use conservative no-hallucination prompt
+    if not has_meaningful_facts:
+        return _generate_bullet_without_facts(
+            original_bullet,
+            job_description,
+            char_limit
+        )
+
+    # PATH 2: With facts - use existing fact-based generation
     # Build facts context
     facts_text = ""
 

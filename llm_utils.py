@@ -867,17 +867,11 @@ def generate_bullet_with_facts(original_bullet: str, job_description: str,
     if not client:
         raise RuntimeError("OPENAI_API_KEY missing")
 
-    # Detect if we have meaningful facts (handle both fact schemas)
+    # Detect if we have meaningful facts
     has_meaningful_facts = bool(
         stored_facts and
-        (
-            # Old schema: metrics, technical_details, impact, context
-            any(stored_facts.get(category) for category in
-                ["metrics", "technical_details", "impact", "context"]) or
-            # New schema: tools, skills, actions, results, situation, timeline
-            any(stored_facts.get(category) for category in
-                ["tools", "skills", "actions", "results", "situation", "timeline"])
-        )
+        any(stored_facts.get(category) for category in
+            ["tools", "skills", "actions", "results", "situation", "timeline"])
     )
 
     # Detailed logging for path detection
@@ -899,58 +893,10 @@ def generate_bullet_with_facts(original_bullet: str, job_description: str,
         return result
 
     # PATH 2: With facts - use existing fact-based generation
-    # Build facts context
+    # Build facts context from stored facts
     facts_text = ""
 
-    # Metrics
-    if stored_facts.get("metrics"):
-        metrics = stored_facts["metrics"]
-        if metrics.get("quantifiable_achievements"):
-            facts_text += "Quantifiable Achievements:\n"
-            for item in metrics["quantifiable_achievements"]:
-                facts_text += f"• {item}\n"
-        if metrics.get("scale"):
-            facts_text += "Scale/Scope:\n"
-            for item in metrics["scale"]:
-                facts_text += f"• {item}\n"
-
-    # Technical details
-    if stored_facts.get("technical_details"):
-        tech = stored_facts["technical_details"]
-        if tech.get("technologies"):
-            facts_text += f"Technologies: {', '.join(tech['technologies'])}\n"
-        if tech.get("methodologies"):
-            facts_text += f"Methodologies: {', '.join(tech['methodologies'])}\n"
-
-    # Impact
-    if stored_facts.get("impact"):
-        impact = stored_facts["impact"]
-        if impact.get("business_outcomes"):
-            facts_text += "Business Impact:\n"
-            for item in impact["business_outcomes"]:
-                facts_text += f"• {item}\n"
-        if impact.get("stakeholder_value"):
-            facts_text += "Stakeholder Value:\n"
-            for item in impact["stakeholder_value"]:
-                facts_text += f"• {item}\n"
-
-    # Context
-    if stored_facts.get("context"):
-        context = stored_facts["context"]
-        if context.get("challenges_solved"):
-            facts_text += "Challenges Solved:\n"
-            for item in context["challenges_solved"]:
-                facts_text += f"• {item}\n"
-        if context.get("scope"):
-            facts_text += "Project Scope:\n"
-            for item in context["scope"]:
-                facts_text += f"• {item}\n"
-        if context.get("role"):
-            facts_text += "Your Role:\n"
-            for item in context["role"]:
-                facts_text += f"• {item}\n"
-
-    # New schema format (situation, actions, results, skills, tools, timeline)
+    # Format facts using the current schema (situation, actions, results, skills, tools, timeline)
     if stored_facts.get("situation"):
         facts_text += f"Situation/Context: {stored_facts['situation']}\n"
 

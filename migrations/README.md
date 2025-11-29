@@ -8,6 +8,10 @@ This directory contains SQL migration files for the resume optimizer refactoring
 2. **002_create_user_bullets.sql** - Creates user_bullets table for storing resume bullets with embeddings
 3. **003_create_bullet_facts.sql** - Creates bullet_facts table for storing extracted facts
 4. **004_alter_qa_sessions.sql** - Adds bullet_id column to qa_sessions table
+5. **005_similarity_search_function.sql** - Creates optimized similarity search function
+6. **006_add_unique_constraint.sql** - Adds unique constraint to prevent duplicate bullets
+7. **007_fix_base_resume_storage.sql** - Migrates base resume storage to BYTEA column type
+8. **008_create_job_application_sessions.sql** - Creates table for session-specific resume storage
 
 ## Running Migrations
 
@@ -66,7 +70,7 @@ SELECT * FROM pg_extension WHERE extname = 'vector';
 -- Check tables exist
 SELECT table_name FROM information_schema.tables
 WHERE table_schema = 'public'
-AND table_name IN ('user_bullets', 'bullet_facts', 'qa_sessions');
+AND table_name IN ('user_bullets', 'bullet_facts', 'qa_sessions', 'user_base_resumes', 'job_application_sessions');
 
 -- Check indexes
 SELECT indexname, tablename FROM pg_indexes

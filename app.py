@@ -682,9 +682,17 @@ async def generate_resume_with_facts(request: BulletGenerationRequest):
             used_facts = False
             enhanced_text = bullet_text  # Default to original
 
-            # Skip fact-based generation if explicitly requested
+            # Handle optimization based on use_stored_facts flag
             if not bullet_item.use_stored_facts:
-                log.info(f"Bullet {idx} opted out of using stored facts")
+                # User chose not to use stored facts - optimize without facts
+                log.info(f"Bullet {idx} opted out of using stored facts, optimizing without facts")
+                enhanced_text = generate_bullet_with_facts(
+                    bullet_text,
+                    request.job_description,
+                    {}  # Empty facts dict triggers no-facts optimization path
+                )
+                used_facts = False
+                without_facts_count += 1
             else:
                 # Use provided bullet_id if available, otherwise match
                 bullet_id = bullet_item.bullet_id

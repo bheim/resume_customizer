@@ -867,11 +867,17 @@ def generate_bullet_with_facts(original_bullet: str, job_description: str,
     if not client:
         raise RuntimeError("OPENAI_API_KEY missing")
 
-    # Detect if we have meaningful facts
+    # Detect if we have meaningful facts (handle both fact schemas)
     has_meaningful_facts = bool(
         stored_facts and
-        any(stored_facts.get(category) for category in
-            ["metrics", "technical_details", "impact", "context"])
+        (
+            # Old schema: metrics, technical_details, impact, context
+            any(stored_facts.get(category) for category in
+                ["metrics", "technical_details", "impact", "context"]) or
+            # New schema: tools, skills, actions, results, situation, timeline
+            any(stored_facts.get(category) for category in
+                ["tools", "skills", "actions", "results", "situation", "timeline"])
+        )
     )
 
     # Detailed logging for path detection
@@ -943,6 +949,37 @@ def generate_bullet_with_facts(original_bullet: str, job_description: str,
             facts_text += "Your Role:\n"
             for item in context["role"]:
                 facts_text += f"• {item}\n"
+
+    # New schema format (situation, actions, results, skills, tools, timeline)
+    if stored_facts.get("situation"):
+        facts_text += f"Situation/Context: {stored_facts['situation']}\n"
+
+    if stored_facts.get("actions"):
+        actions = stored_facts["actions"]
+        if isinstance(actions, list) and actions:
+            facts_text += "Actions Taken:\n"
+            for item in actions:
+                facts_text += f"• {item}\n"
+
+    if stored_facts.get("results"):
+        results = stored_facts["results"]
+        if isinstance(results, list) and results:
+            facts_text += "Results/Achievements:\n"
+            for item in results:
+                facts_text += f"• {item}\n"
+
+    if stored_facts.get("skills"):
+        skills = stored_facts["skills"]
+        if isinstance(skills, list) and skills:
+            facts_text += f"Skills: {', '.join(skills)}\n"
+
+    if stored_facts.get("tools"):
+        tools = stored_facts["tools"]
+        if isinstance(tools, list) and tools:
+            facts_text += f"Tools/Technologies: {', '.join(tools)}\n"
+
+    if stored_facts.get("timeline"):
+        facts_text += f"Timeline: {stored_facts['timeline']}\n"
 
     char_limit_text = f"\nIMPORTANT: Keep the bullet under {char_limit} characters." if char_limit else ""
 

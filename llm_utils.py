@@ -545,12 +545,17 @@ def _generate_bullet_without_facts(original_bullet: str, job_description: str,
     This ensures bullets without context still get optimized for the JD
     while maintaining 100% factual accuracy to the original.
     """
+    log.debug(f"_generate_bullet_without_facts called")
+    log.debug(f"  Original: '{original_bullet}'")
+    log.debug(f"  JD length: {len(job_description)} chars")
+    log.debug(f"  Char limit: {char_limit}")
+
     char_limit_text = (
         f"\n\nCHARACTER LIMIT: Keep the bullet under {char_limit} characters."
         if char_limit else ""
     )
 
-    prompt = f"""You are a professional resume writer. Optimize this bullet for the target job description.
+    prompt = f"""You are a professional resume writer. Optimize this bullet for the target job description while preserving ALL factual content.
 
 ⚠️  CRITICAL ANTI-HALLUCINATION RULES - STRICTLY ENFORCED:
 
@@ -560,11 +565,21 @@ def _generate_bullet_without_facts(original_bullet: str, job_description: str,
 4. FACT-CHECK YOURSELF: Every claim in your output must have a direct source in the original bullet
 
 ✅ WHAT YOU CAN DO (Surface-level optimization only):
-• Strengthen action verbs to match job description tone (e.g., "worked on" → "developed")
-• Restructure to Google XYZ format: [Action verb] [X] as measured by [Y] by doing [Z]
+• Strengthen action verbs to match job description tone
+  Examples: "worked on" → "developed", "helped with" → "contributed to", "did" → "executed"
+
+• Restructure using impact-first formats (use variety, NOT the same structure for every bullet):
+  - "[Action] [X] resulting in [Y]"
+  - "[Action] [X] by doing [Z]"
+  - "[Action] [X], achieving [Y]"
+  - "[Action] [X] to drive [Y]"
+  - "[Action] [X] through [Z]"
+
 • Align terminology with job description keywords (keep meaning identical)
-• Improve readability and flow
-• Reorder information for impact
+  If JD says "engineered" instead of "built", swap them. If JD says "optimized" instead of "improved", swap them.
+
+• Improve readability and flow - make it punchy and clear
+• Reorder information to lead with impact
 
 ❌ WHAT YOU ABSOLUTELY CANNOT DO:
 • Add metrics not in original (team size, percentages, numbers, timeframes)
@@ -586,17 +601,19 @@ VALIDATION CHECKLIST (mentally verify before responding):
 □ Every metric in output appears in original?
 □ Every claim can be traced to original?
 
-Return ONLY the optimized bullet text. No explanations, no commentary.
-
-If the original is already well-written and you cannot improve it WITHOUT adding information, return it unchanged or with minimal rephrasing."""
+Return ONLY the optimized bullet text. No explanations, no commentary."""
 
     try:
+        log.debug(f"  Calling OpenAI with temperature=0.3")
         response = client.chat.completions.create(
             model=CHAT_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0  # Deterministic output
+            temperature=0.3  # Slightly higher for variety, still controlled
         )
         enhanced = response.choices[0].message.content.strip()
+
+        log.info(f"  LLM returned: '{enhanced[:100]}...'")
+        log.debug(f"  Full LLM response: '{enhanced}'")
 
         # Post-processing validation: log if output seems suspiciously longer
         if len(enhanced) > len(original_bullet) * 1.5:
@@ -606,10 +623,17 @@ If the original is already well-written and you cannot improve it WITHOUT adding
                 f"Potential hallucination risk."
             )
 
+        # Check if unchanged
+        if enhanced == original_bullet:
+            log.info(f"  LLM returned bullet unchanged (may be intentional if already good)")
+        else:
+            log.info(f"  Bullet modified - Original len: {len(original_bullet)}, Enhanced len: {len(enhanced)}")
+
         return enhanced
 
     except Exception as e:
         log.exception(f"Error in no-facts bullet generation: {e}")
+        log.error(f"  Falling back to original bullet")
         # Fallback: return original if generation fails
         return original_bullet
 
@@ -644,13 +668,23 @@ def generate_bullet_with_facts(original_bullet: str, job_description: str,
             ["metrics", "technical_details", "impact", "context"])
     )
 
+    # Detailed logging for path detection
+    log.info(f"generate_bullet_with_facts - Bullet: '{original_bullet[:60]}...'")
+    log.info(f"  stored_facts keys: {list(stored_facts.keys()) if stored_facts else 'None'}")
+    log.info(f"  has_meaningful_facts: {has_meaningful_facts}")
+
     # PATH 1: No facts - use conservative no-hallucination prompt
     if not has_meaningful_facts:
-        return _generate_bullet_without_facts(
+        log.info(f"  → Taking NO-FACTS path (conservative optimization)")
+        result = _generate_bullet_without_facts(
             original_bullet,
             job_description,
             char_limit
         )
+        log.info(f"  → No-facts result: '{result[:80]}...'")
+        if result == original_bullet:
+            log.warning(f"  ⚠️  No-facts optimization returned UNCHANGED bullet")
+        return result
 
     # PATH 2: With facts - use existing fact-based generation
     # Build facts context
@@ -706,6 +740,9 @@ def generate_bullet_with_facts(original_bullet: str, job_description: str,
 
     char_limit_text = f"\nIMPORTANT: Keep the bullet under {char_limit} characters." if char_limit else ""
 
+    log.info(f"  → Taking WITH-FACTS path (rich optimization)")
+    log.debug(f"  Facts text length: {len(facts_text)} chars")
+
     prompt = f"""You are a professional resume writer. Rewrite this bullet using the provided facts and tailoring it to the job description.
 
 ORIGINAL BULLET:
@@ -718,20 +755,35 @@ VERIFIED FACTS ABOUT THIS EXPERIENCE:
 {facts_text}
 
 REWRITING GUIDELINES:
-• Use the Google XYZ formula: [Action verb] [X] as measured by [Y] by doing [Z]
-• Start with strong, impactful action verbs (e.g., Led, Developed, Improved, Reduced, Increased, Delivered, Built, Designed, Implemented - this list is not comprehensive, choose the verb that best fits)
+• Use impact-driven formats inspired by Google XYZ (but vary the structure for uniqueness):
+  Examples:
+  - "[Action] [X] resulting in [Y]"
+  - "[Action] [X], achieving [Y]"
+  - "[Action] [X] by doing [Z]"
+  - "[Action] [X] to drive [Y]"
+  - "[Action] [X], improving [Y] by [Z]"
+  - "[Action] [X] through [Z], delivering [Y]"
+
+  AVOID using "as measured by" in every bullet - use natural language variations
+
+• Start with strong, impactful action verbs that match the job description
+  Examples: Led, Developed, Engineered, Optimized, Architected, Drove, Delivered, Built, Designed, Implemented, Spearheaded
+  (Choose the verb that best fits the accomplishment AND aligns with JD language)
+
 • Incorporate specific metrics and achievements from the facts
 • Align with the job description's requirements and terminology
 • Preserve ownership language and demonstrate impact
-• Keep it concise and powerful
+• Keep it concise, powerful, and unique
+• Use variety in structure - don't make all bullets sound the same
 • DO NOT add information not present in the facts{char_limit_text}
 
 Return ONLY the rewritten bullet, no commentary or explanation."""
 
+    log.debug(f"  Calling OpenAI with temperature=0.4 for variety")
     r = client.chat.completions.create(
         model=CHAT_MODEL,
         messages=[{"role": "user", "content": prompt}],
-        temperature=0
+        temperature=0.4  # Higher for structural variety while staying factual
     )
 
     enhanced_bullet = (r.choices[0].message.content or "").strip()
@@ -739,7 +791,10 @@ Return ONLY the rewritten bullet, no commentary or explanation."""
     # Clean up any bullet markers or extra formatting
     enhanced_bullet = enhanced_bullet.lstrip("-• ").strip()
 
-    log.info(f"Generated bullet with facts: {len(enhanced_bullet)} chars")
+    log.info(f"  → With-facts result: '{enhanced_bullet[:80]}...'")
+    log.info(f"  → Generated bullet: {len(enhanced_bullet)} chars")
+    log.debug(f"  Full bullet: '{enhanced_bullet}'")
+
     return enhanced_bullet
 
 

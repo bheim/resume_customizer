@@ -1,0 +1,155 @@
+id,title,type,description
+software_engineer,Senior Software Engineer - Backend,technical_engineering,"We're seeking a Senior Software Engineer to build scalable backend systems for our high-growth SaaS platform serving 100K+ enterprise users.
+
+Responsibilities:
+• Design and implement distributed microservices architecture using Python, Java, or Go
+• Build RESTful APIs and GraphQL services with focus on performance and reliability
+• Optimize database queries (SQL/NoSQL) and implement caching strategies
+• Collaborate with product and data teams to deliver features that drive user engagement
+• Mentor junior engineers and contribute to technical architecture decisions
+• Write clean, maintainable code with comprehensive test coverage
+
+Requirements:
+• 5+ years backend development experience with Python, Java, or similar
+• Strong SQL skills and experience with PostgreSQL, MySQL, or similar RDBMS
+• Experience building and scaling APIs serving millions of requests
+• Proficiency with AWS, GCP, or Azure cloud platforms
+• Understanding of CI/CD, containerization (Docker/Kubernetes)
+• Strong problem-solving skills and data-driven approach to decision making
+
+Nice to have:
+• Experience with data analytics and building internal tools
+• Background in EdTech, FinTech, or Insurance Tech
+• Contributions to open source projects"
+data_analyst,Senior Data Analyst,technical_analytics,"Join our data team to drive strategic insights that shape product and business decisions. You'll work cross-functionally to analyze user behavior, market trends, and business metrics.
+
+Responsibilities:
+• Analyze large datasets using SQL, Python, and statistical methods to uncover insights
+• Build dashboards and reports in Tableau, Looker, or PowerBI for stakeholders
+• Conduct A/B tests and experiments to measure feature impact
+• Partner with product, engineering, and business teams to define KPIs and track metrics
+• Identify growth opportunities through market analysis and competitive research
+• Present findings and recommendations to leadership with clear data storytelling
+
+Requirements:
+• 4+ years experience in data analysis role
+• Expert-level SQL skills; proficiency with Python or R for statistical analysis
+• Experience with BI tools (Tableau, Looker, PowerBI)
+• Strong understanding of statistical methods and experimental design
+• Proven track record of translating data into actionable business insights
+• Excellent communication skills with ability to present to non-technical audiences
+
+Nice to have:
+• Experience in insurance, financial services, or EdTech
+• Knowledge of predictive modeling and machine learning
+• Familiarity with ETL processes and data pipelines"
+product_manager,Senior Product Manager,product_strategy,"We're looking for a strategic Product Manager to lead development of our core platform features. You'll own the product roadmap, drive user-centered design, and ship features that delight customers.
+
+Responsibilities:
+• Define product vision and strategy aligned with business goals
+• Conduct user research through interviews, surveys, and data analysis to inform roadmap
+• Collaborate with engineering, design, and data teams to ship high-impact features
+• Use analytics to measure feature adoption, engagement, and business impact
+• Lead sprint planning, prioritization, and stakeholder communication
+• Drive go-to-market strategy for new product launches
+
+Requirements:
+• 5+ years product management experience, preferably in B2B SaaS
+• Strong analytical skills with proficiency in SQL and product analytics tools
+• Experience conducting user research and applying human-centered design principles
+• Proven ability to ship products from 0 to 1 and scale existing features
+• Excellent stakeholder management and communication skills
+• Data-driven decision making with focus on metrics and user outcomes
+
+Nice to have:
+• Technical background or engineering degree
+• Experience in EdTech, InsurTech, or marketplace products
+• MBA or equivalent business strategy experience"
+management_consultant,Management Consultant - Strategy & Operations,business_consulting,"Join our strategy consulting practice to solve complex business challenges for Fortune 500 clients. You'll lead market analysis, develop growth strategies, and drive operational improvements.
+
+Responsibilities:
+• Lead client engagements focused on growth strategy, market entry, and operational excellence
+• Conduct market research and competitive analysis to identify opportunities
+• Build financial models and business cases to support strategic recommendations
+• Facilitate workshops with C-suite executives to align on priorities
+• Analyze data to uncover insights and drive evidence-based recommendations
+• Mentor junior consultants and contribute to firm thought leadership
+
+Requirements:
+• 3-5 years consulting experience at top-tier firm or equivalent
+• Strong analytical skills with proficiency in Excel, SQL, and data visualization
+• Experience across multiple industries (financial services, insurance, tech preferred)
+• Excellent executive presence and stakeholder management
+• MBA from top business school or equivalent experience
+• Track record of driving measurable client impact ($100M+ portfolio experience valued)
+
+Nice to have:
+• Experience in insurance pricing, underwriting, or risk analytics
+• Background in venture-backed startups or entrepreneurship
+• Advanced analytics skills (Python, R, statistical modeling)"
+account_manager,Senior Account Manager - Enterprise,sales_customer_success,"Manage relationships with our largest enterprise clients (Fortune 1000) to drive retention, expansion, and customer success. Own $20M+ in annual recurring revenue.
+
+Responsibilities:
+• Serve as primary contact for portfolio of 15-20 enterprise accounts
+• Drive renewals, upsells, and expansion within existing customer base
+• Conduct quarterly business reviews showcasing value and ROI
+• Collaborate with product and support teams to resolve customer issues
+• Identify growth opportunities through data analysis of usage patterns
+• Build executive relationships and influence strategic decisions
+
+Requirements:
+• 5+ years enterprise account management or customer success experience
+• Proven track record managing $10M+ ARR portfolio with 95%+ retention
+• Strong business acumen and ability to articulate value proposition
+• Experience using CRM systems (Salesforce, HubSpot) and analytics tools
+• Excellent communication and negotiation skills
+• Data-driven approach to identifying risks and opportunities
+
+Nice to have:
+• Experience in B2B SaaS, EdTech, or Financial Services
+• Background in consulting or analytics
+• Technical understanding of software products"
+marketing_manager,Product Marketing Manager,marketing_growth,"Drive go-to-market strategy and growth initiatives for our B2B product portfolio. Own positioning, messaging, and campaigns that drive pipeline and revenue.
+
+Responsibilities:
+• Develop product positioning and messaging based on customer insights and market research
+• Lead go-to-market launches for new products and features
+• Create compelling content (case studies, whitepapers, webinars) that drives demand
+• Analyze campaign performance and optimize based on conversion metrics
+• Partner with sales to develop enablement materials and competitive intelligence
+• Conduct customer interviews and market research to inform strategy
+
+Requirements:
+• 4+ years product marketing or growth marketing experience in B2B SaaS
+• Strong analytical skills with experience using marketing analytics tools
+• Proven ability to drive measurable results (pipeline, conversion, engagement)
+• Excellent storytelling and content creation skills
+• Experience managing cross-functional stakeholders
+• Data-driven approach to campaign optimization
+
+Nice to have:
+• Experience marketing to education, insurance, or financial services sectors
+• Background in product management or user research
+• Familiarity with marketing automation platforms (HubSpot, Marketo)"
+project_manager,Senior Project Manager - Digital Transformation,operations_pm,"Lead complex digital transformation initiatives for enterprise clients. Manage cross-functional teams, drive execution, and ensure projects deliver on time and within budget.
+
+Responsibilities:
+• Manage end-to-end delivery of enterprise software implementations ($5M+ projects)
+• Lead cross-functional teams of 10-20 people across engineering, product, and operations
+• Define project scope, timelines, and success metrics in partnership with stakeholders
+• Identify and mitigate risks; escalate issues and drive resolution
+• Track project health using data and analytics; report status to executives
+• Drive adoption and change management with client organizations
+
+Requirements:
+• 5+ years project management experience delivering complex technology projects
+• PMP or equivalent certification preferred
+• Experience with Agile/Scrum methodologies and project management tools (Jira, Asana)
+• Strong analytical and problem-solving skills
+• Excellent stakeholder management and communication abilities
+• Proven track record delivering projects on time and within budget
+
+Nice to have:
+• Experience in insurance, financial services, or EdTech
+• Technical background or engineering degree
+• Change management certification or experience"

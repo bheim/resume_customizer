@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from config import log, health, supabase
 from docx_utils import load_docx, collect_word_numbered_bullets, set_paragraph_text_with_selective_links, enforce_single_page
-from llm_utils import rewrite_with_openai, generate_followup_questions, should_ask_more_questions, rewrite_with_context
+from llm_utils import should_ask_more_questions
 from caps import tiered_char_cap, enforce_char_cap_with_reprompt
 from scoring import composite_score
 from db_utils import (create_qa_session, get_qa_session, store_qa_pair, update_qa_answer,

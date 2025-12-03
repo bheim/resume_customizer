@@ -11,7 +11,7 @@ Usage:
     python evaluate_prompts.py --verbose
 """
 
-import yaml
+import csv
 import json
 import sys
 import argparse
@@ -21,6 +21,54 @@ from config import client, CHAT_MODEL, log
 from llm_utils import generate_bullet_with_facts
 from json import loads
 import re
+
+
+def load_bullets_from_csv(csv_path: str = "bullets.csv") -> List[Dict]:
+    """Load bullets and their facts from CSV file."""
+    bullets = []
+
+    with open(csv_path, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            # Parse pipe-delimited multi-value fields
+            has_context = row['has_context'].lower() == 'true'
+
+            facts = {}
+            if has_context:
+                facts = {
+                    'tools': [t.strip() for t in row['tools'].split('|') if t.strip()],
+                    'skills': [s.strip() for s in row['skills'].split('|') if s.strip()],
+                    'actions': [a.strip() for a in row['actions'].split('|') if a.strip()],
+                    'results': [r.strip() for r in row['results'].split('|') if r.strip()],
+                    'timeline': row['timeline'].strip() if row['timeline'] else '',
+                    'situation': row['situation'].strip() if row['situation'] else ''
+                }
+
+            bullets.append({
+                'id': row['id'],
+                'bullet': row['bullet_text'],
+                'has_context': has_context,
+                'facts': facts
+            })
+
+    return bullets
+
+
+def load_jobs_from_csv(csv_path: str = "jobs.csv") -> List[Dict]:
+    """Load job descriptions from CSV file."""
+    jobs = []
+
+    with open(csv_path, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            jobs.append({
+                'id': row['id'],
+                'title': row['title'],
+                'type': row['type'],
+                'description': row['description']
+            })
+
+    return jobs
 
 
 def llm_judge_single_bullet(
@@ -143,19 +191,16 @@ Be strict and objective. A mediocre bullet should score 5-6, not 8-9."""
         }
 
 
-def run_evaluation(fixtures_path: str = "test_fixtures.yaml", verbose: bool = False) -> List[Dict]:
+def run_evaluation(bullets_csv: str = "bullets.csv", jobs_csv: str = "jobs.csv", verbose: bool = False) -> List[Dict]:
     """Run full evaluation across all bullets and job types."""
 
     print(f"\n{'='*80}")
     print("PROMPT EVALUATION - Testing WITH-FACTS and NO-FACTS paths")
     print(f"{'='*80}\n")
 
-    # Load fixtures
-    with open(fixtures_path, 'r') as f:
-        fixtures = yaml.safe_load(f)
-
-    bullets = fixtures['bullets']
-    job_descriptions = fixtures['job_descriptions']
+    # Load CSV files
+    bullets = load_bullets_from_csv(bullets_csv)
+    job_descriptions = load_jobs_from_csv(jobs_csv)
 
     results = []
     total_tests = len(bullets) * len(job_descriptions)
@@ -338,14 +383,15 @@ def save_results(results: List[Dict], output_path: str):
 
 def main():
     parser = argparse.ArgumentParser(description='Evaluate prompt performance')
-    parser.add_argument('--fixtures', default='test_fixtures.yaml', help='Path to test fixtures')
+    parser.add_argument('--bullets', default='bullets.csv', help='Path to bullets CSV file')
+    parser.add_argument('--jobs', default='jobs.csv', help='Path to jobs CSV file')
     parser.add_argument('--save', help='Save detailed results to JSON file')
     parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output')
 
     args = parser.parse_args()
 
     # Run evaluation
-    results = run_evaluation(args.fixtures, args.verbose)
+    results = run_evaluation(args.bullets, args.jobs, args.verbose)
 
     # Print summary
     print_summary(results)

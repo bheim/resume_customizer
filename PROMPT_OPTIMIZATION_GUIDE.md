@@ -12,7 +12,8 @@ This framework tests your prompts against **9 diverse bullets** (4 with context,
 
 ## Files
 
-- **`test_fixtures.yaml`** - Test bullets + 7 job descriptions with diverse roles
+- **`bullets.csv`** - Test bullets with facts (9 bullets: 3 with context, 6 without)
+- **`jobs.csv`** - 7 job descriptions with diverse roles (tech, business, operations, etc.)
 - **`evaluate_prompts.py`** - Runs current prompts and uses LLM-as-judge to score results
 - **`optimize_prompts.py`** - Uses LLM to suggest prompt improvements based on eval results
 
@@ -108,38 +109,27 @@ python optimize_prompts.py baseline_results.json --prompt-type with_facts
 
 ### Add More Test Cases
 
-Edit `test_fixtures.yaml`:
+Edit `bullets.csv` and add a new row:
 
-```yaml
-bullets:
-  - id: "new_bullet_with_context"
-    bullet: "Your bullet text here"
-    has_context: true
-    facts:
-      tools: ["Python", "SQL"]
-      actions: ["Built X", "Analyzed Y"]
-      results: ["Achieved Z"]
-      # ... etc
-
-  - id: "new_bullet_no_context"
-    bullet: "Another bullet"
-    has_context: false
-    facts: {}
+```csv
+id,bullet_text,has_context,tools,skills,actions,results,timeline,situation
+new_bullet_with_context,"Your bullet text here",true,"Python|SQL","Data analysis","Built X|Analyzed Y","Achieved Z","","Context description here"
+new_bullet_no_context,"Another bullet",false,"","","","","",""
 ```
+
+Note: Use pipe (`|`) delimiter for multi-value fields (tools, skills, actions, results)
 
 ### Add More Job Types
 
-Edit `test_fixtures.yaml`:
+Edit `jobs.csv` and add a new row:
 
-```yaml
-job_descriptions:
-  - id: "new_job_type"
-    title: "New Role Title"
-    type: "category"
-    description: |
-      Full job description here...
-      Include key skills, responsibilities, requirements.
+```csv
+id,title,type,description
+new_job_type,New Role Title,category,"Full job description here...
+Include key skills, responsibilities, requirements."
 ```
+
+Note: Multi-line descriptions are supported - just wrap in quotes
 
 ---
 
@@ -289,12 +279,9 @@ ls -la config.py llm_utils.py
 
 ```bash
 # Test with smaller subset first
-# Edit test_fixtures.yaml and comment out some job descriptions
-# Or test single bullet:
-python -c "
-from evaluate_prompts import *
-# Run custom evaluation logic here
-"
+# Edit bullets.csv or jobs.csv to temporarily remove some rows
+# Or test with custom CSV files:
+python evaluate_prompts.py --bullets my_test_bullets.csv --jobs my_test_jobs.csv
 ```
 
 ### LLM judge giving inconsistent scores

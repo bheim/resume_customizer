@@ -21,25 +21,43 @@ This framework tests your prompts against **9 diverse bullets** (4 with context,
 
 ## Quick Start
 
-### 1. Run Baseline Evaluation
+### 1. Run Head-to-Head Evaluation
 
 ```bash
-python evaluate_prompts.py --save baseline_results.json
+# Test both approaches (single-stage vs scaffolded)
+python evaluate_prompts.py --approach both --save comparison_results.json
+
+# Or test just one approach
+python evaluate_prompts.py --approach single --save single_results.json
+python evaluate_prompts.py --approach scaffolded --save scaffolded_results.json
 ```
 
+**What Gets Tested:**
+- **Single-Stage**: Current one-shot prompt (select facts + craft bullet in one call)
+- **Scaffolded**: Two-stage approach (explicitly select facts first, then craft bullet)
+
+**For Each Test Case:**
+- Scores ORIGINAL bullet (baseline) on 6 dimensions
+- Scores OPTIMIZED bullet on same 6 dimensions
+- Calculates DELTA (improvement or regression)
+- Shows before → after scores with color coding
+
 **Output:**
-- Runs all 63 test cases (9 bullets × 7 job types)
-- Scores each on 6 dimensions (1-10):
+- Runs all 63 test cases (9 bullets × 7 job types) PER APPROACH
+- 6-dimension scoring (1-10 scale):
   - Relevance to JD
   - Conciseness
   - Impact & Metrics
   - Action Verbs
   - Factual Accuracy (critical for NO-FACTS)
   - Keyword Alignment
-- Prints summary with averages by context type and job type
-- Saves detailed results to JSON
+- Shows average delta/improvement for each approach
+- Declares HEAD-TO-HEAD WINNER if testing both
+- Saves detailed results with baseline, optimized, and delta scores
 
-**Expected time:** ~10-15 minutes (depends on API speed)
+**Expected time:**
+- Single approach: ~15-20 minutes (2 LLM calls per test case)
+- Both approaches: ~30-40 minutes (4 LLM calls per test case)
 
 ### 2. Get LLM Suggestions for Improvement
 

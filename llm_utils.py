@@ -638,6 +638,185 @@ REWRITING GUIDELINES:
     return enhanced_bullet
 
 
+def generate_bullet_with_facts_scaffolded(original_bullet: str, job_description: str,
+                                         stored_facts: Dict, char_limit: Optional[int] = None) -> str:
+    """
+    Two-stage scaffolded bullet generation:
+    1. Select most relevant facts for the JD
+    2. Craft bullet using only selected facts
+
+    This approach forces explicit prioritization before writing.
+
+    Args:
+        original_bullet: The original bullet text
+        job_description: Target job description
+        stored_facts: Structured facts from extract_facts_from_qa() (can be empty {})
+        char_limit: Optional character limit for the bullet
+
+    Returns:
+        Enhanced bullet string
+    """
+    if not client:
+        raise RuntimeError("OPENAI_API_KEY missing")
+
+    # Detect if we have meaningful facts
+    has_meaningful_facts = bool(
+        stored_facts and
+        any(stored_facts.get(category) for category in
+            ["tools", "skills", "actions", "results", "situation", "timeline"])
+    )
+
+    log.info(f"generate_bullet_with_facts_SCAFFOLDED - Bullet: '{original_bullet[:60]}...'")
+    log.info(f"  has_meaningful_facts: {has_meaningful_facts}")
+
+    # If no facts, use the same conservative path as single-stage
+    if not has_meaningful_facts:
+        log.info(f"  → Taking NO-FACTS path (same as single-stage)")
+        return _generate_bullet_without_facts(
+            original_bullet,
+            job_description,
+            char_limit
+        )
+
+    # STAGE 1: Select most relevant facts
+    log.info(f"  → STAGE 1: Selecting most relevant facts")
+
+    # Format available facts
+    facts_list = []
+    if stored_facts.get("situation"):
+        facts_list.append(f"Context: {stored_facts['situation']}")
+
+    if stored_facts.get("actions"):
+        for action in stored_facts["actions"]:
+            facts_list.append(f"Action: {action}")
+
+    if stored_facts.get("results"):
+        for result in stored_facts["results"]:
+            facts_list.append(f"Result: {result}")
+
+    if stored_facts.get("skills"):
+        facts_list.append(f"Skills: {', '.join(stored_facts['skills'])}")
+
+    if stored_facts.get("tools"):
+        facts_list.append(f"Tools: {', '.join(stored_facts['tools'])}")
+
+    if stored_facts.get("timeline"):
+        facts_list.append(f"Timeline: {stored_facts['timeline']}")
+
+    facts_enumerated = "\n".join([f"{i+1}. {fact}" for i, fact in enumerate(facts_list)])
+
+    selection_prompt = f"""You are helping optimize a resume bullet for a specific job.
+
+TARGET JOB DESCRIPTION:
+{job_description}
+
+ORIGINAL BULLET:
+{original_bullet}
+
+AVAILABLE FACTS:
+{facts_enumerated}
+
+Your task: Select the 2-3 most impactful facts that:
+1. Are most relevant to the target job description
+2. Demonstrate the strongest achievements/skills
+3. Will create the most compelling bullet when combined
+
+Consider:
+- What does this job emphasize? (technical skills, leadership, impact, specific tools?)
+- Which facts would make a hiring manager think "this person is perfect for this role"?
+- Quality over quantity - fewer powerful facts beat many weak ones
+
+Return ONLY valid JSON (no commentary):
+{{
+  "selected_facts": ["fact #X", "fact #Y", ...],
+  "reasoning": "Brief explanation of why these facts matter most for THIS job"
+}}"""
+
+    log.debug(f"  Selection prompt created, calling OpenAI")
+
+    r1 = client.chat.completions.create(
+        model=CHAT_MODEL,
+        messages=[{"role": "user", "content": selection_prompt}],
+        temperature=0  # Deterministic selection
+    )
+
+    selection_raw = (r1.choices[0].message.content or "").strip()
+
+    # Clean code fences if present
+    if selection_raw.startswith("```"):
+        selection_raw = selection_raw.strip("`")
+        selection_raw = re.sub(r"^\s*json", "", selection_raw, flags=re.I).strip()
+
+    try:
+        selection_data = json.loads(selection_raw)
+        selected_facts = selection_data.get("selected_facts", [])
+        reasoning = selection_data.get("reasoning", "")
+
+        log.info(f"  → Selected {len(selected_facts)} facts")
+        log.info(f"  → Reasoning: {reasoning}")
+        for fact in selected_facts:
+            log.info(f"    • {fact}")
+    except json.JSONDecodeError:
+        log.warning(f"  ⚠️  Failed to parse selection JSON, using all facts")
+        selected_facts = facts_list
+        reasoning = "Using all facts due to parse error"
+
+    # STAGE 2: Craft bullet from selected facts only
+    log.info(f"  → STAGE 2: Crafting bullet from selected facts")
+
+    selected_facts_text = "\n".join([f"• {fact}" for fact in selected_facts])
+    char_limit_text = f"\nIMPORTANT: Keep the bullet under {char_limit} characters." if char_limit else ""
+
+    crafting_prompt = f"""You are a professional resume writer creating an optimized bullet point.
+
+TARGET JOB DESCRIPTION:
+{job_description}
+
+SELECTED FACTS TO USE (use ONLY these):
+{selected_facts_text}
+
+WHY THESE FACTS: {reasoning}
+
+WRITING GUIDELINES:
+
+1. ACTION VERBS - Use strong ownership language:
+   • Strong verbs: Led, Developed, Engineered, Optimized, Architected, Drove, Delivered, Built, Designed, Implemented
+   • Match the job description's language level
+
+2. STRUCTURE - Craft one powerful statement:
+   • Lead with action verb
+   • State the achievement/outcome clearly
+   • Include the most impressive metric/result
+   • END IMMEDIATELY after the strongest point - don't trail off
+
+3. CONCISENESS - Every word must earn its place:
+   • Cut filler: "comprehensive", "utilizing", "leveraging"
+   • Don't explain the obvious
+   • After stating the result, STOP - no trailing "through X" clauses
+
+4. JD ALIGNMENT - Use terminology from the job description
+
+5. FACTS ONLY - Do NOT add information beyond the selected facts above{char_limit_text}
+
+Return ONLY the new bullet."""
+
+    log.debug(f"  Crafting prompt created, calling OpenAI")
+
+    r2 = client.chat.completions.create(
+        model=CHAT_MODEL,
+        messages=[{"role": "user", "content": crafting_prompt}],
+        temperature=0.4  # Allow some variety in phrasing
+    )
+
+    enhanced_bullet = (r2.choices[0].message.content or "").strip()
+    enhanced_bullet = enhanced_bullet.lstrip("-• ").strip()
+
+    log.info(f"  → Scaffolded result: '{enhanced_bullet[:80]}...'")
+    log.info(f"  → Generated bullet: {len(enhanced_bullet)} chars")
+
+    return enhanced_bullet
+
+
 def generate_conversational_question(bullet_text: str) -> str:
     """
     Generate an initial conversational question to start gathering context about a bullet.

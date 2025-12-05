@@ -18,7 +18,7 @@ import argparse
 from typing import Dict, List, Any
 from datetime import datetime
 from config import client, CHAT_MODEL, log
-from llm_utils import generate_bullet_with_facts
+from llm_utils import generate_bullet_with_facts, generate_bullet_with_facts_scaffolded
 from json import loads
 import re
 
@@ -72,14 +72,14 @@ def load_jobs_from_csv(csv_path: str = "jobs.csv") -> List[Dict]:
 
 
 def llm_judge_single_bullet(
-    original: str,
-    optimized: str,
+    bullet: str,
     jd: str,
     jd_type: str,
-    has_context: bool
+    has_context: bool,
+    bullet_label: str = "BULLET"
 ) -> Dict[str, Any]:
     """
-    Use LLM as judge to evaluate a single bullet optimization.
+    Use LLM as judge to evaluate a single bullet.
 
     Scores on 6 dimensions (1-10 each):
     1. Relevance to JD
@@ -90,26 +90,22 @@ def llm_judge_single_bullet(
     6. JD keyword alignment
     """
 
-    context_note = "NO CONTEXT PROVIDED - Check for hallucination!" if not has_context else "CONTEXT PROVIDED - Check facts adherence"
+    context_note = "NO CONTEXT - Penalize hallucination" if not has_context else "WITH CONTEXT - Penalize adding unverified info"
 
-    prompt = f"""You are evaluating a resume bullet optimization for quality and adherence to guidelines.
+    prompt = f"""You are evaluating a resume bullet for quality and adherence to best practices.
 
-ORIGINAL BULLET:
-{original}
-
-OPTIMIZED BULLET:
-{optimized}
+{bullet_label}:
+{bullet}
 
 JOB TYPE: {jd_type}
 JOB DESCRIPTION:
 {jd}
 
-EVALUATION CONTEXT:
-{context_note}
+CONTEXT: {context_note}
 
 ---
 
-Score the OPTIMIZED bullet on these 6 dimensions (1-10 scale):
+Score this bullet on these 6 dimensions (1-10 scale):
 
 1. **Relevance to JD** (1-10)
    - Does it align with the job's key skills, technologies, and responsibilities?
@@ -191,189 +187,287 @@ Be strict and objective. A mediocre bullet should score 5-6, not 8-9."""
         }
 
 
-def run_evaluation(bullets_csv: str = "bullets.csv", jobs_csv: str = "jobs.csv", verbose: bool = False) -> List[Dict]:
-    """Run full evaluation across all bullets and job types."""
+def compare_bullets(
+    original: str,
+    optimized: str,
+    jd: str,
+    jd_type: str,
+    has_context: bool,
+    verbose: bool = False
+) -> Dict[str, Any]:
+    """
+    Score both original and optimized bullets, return both scores + deltas.
+    """
+    if verbose:
+        print(f"  Scoring ORIGINAL bullet...")
+    baseline = llm_judge_single_bullet(original, jd, jd_type, has_context, "ORIGINAL BULLET")
+
+    if verbose:
+        print(f"  Scoring OPTIMIZED bullet...")
+    optimized_scores = llm_judge_single_bullet(optimized, jd, jd_type, has_context, "OPTIMIZED BULLET")
+
+    # Calculate deltas
+    dimensions = ["relevance", "conciseness", "impact", "action_verbs", "factual_accuracy", "keyword_alignment"]
+    deltas = {}
+    for dim in dimensions:
+        deltas[dim] = optimized_scores.get(dim, 0) - baseline.get(dim, 0)
+
+    deltas["total"] = optimized_scores.get("total", 0) - baseline.get("total", 0)
+
+    return {
+        "baseline": baseline,
+        "optimized": optimized_scores,
+        "deltas": deltas
+    }
+
+
+def run_evaluation(bullets_csv: str = "bullets.csv", jobs_csv: str = "jobs.csv", verbose: bool = False, approach: str = "both") -> Dict[str, List[Dict]]:
+    """
+    Run full evaluation across all bullets and job types.
+
+    Args:
+        approach: "single", "scaffolded", or "both" (default: "both")
+
+    Returns:
+        Dict with "single_stage" and/or "scaffolded" results
+    """
 
     print(f"\n{'='*80}")
-    print("PROMPT EVALUATION - Testing WITH-FACTS and NO-FACTS paths")
+    print("PROMPT EVALUATION - Head-to-Head Comparison")
+    print(f"Testing: {approach.upper()} approach(es)")
     print(f"{'='*80}\n")
 
     # Load CSV files
     bullets = load_bullets_from_csv(bullets_csv)
     job_descriptions = load_jobs_from_csv(jobs_csv)
 
-    results = []
-    total_tests = len(bullets) * len(job_descriptions)
-    test_num = 0
+    results_by_approach = {}
 
-    print(f"Running {total_tests} test cases ({len(bullets)} bullets × {len(job_descriptions)} job types)...\n")
+    # Determine which approaches to test
+    approaches_to_test = []
+    if approach in ["single", "both"]:
+        approaches_to_test.append(("single_stage", generate_bullet_with_facts))
+    if approach in ["scaffolded", "both"]:
+        approaches_to_test.append(("scaffolded", generate_bullet_with_facts_scaffolded))
 
-    # Test each bullet against each job type
-    for bullet_data in bullets:
-        bullet_id = bullet_data['id']
-        bullet_text = bullet_data['bullet']
-        has_context = bullet_data['has_context']
-        facts = bullet_data['facts']
+    for approach_name, generator_func in approaches_to_test:
+        print(f"\n{'='*80}")
+        print(f"TESTING: {approach_name.upper().replace('_', ' ')}")
+        print(f"{'='*80}\n")
 
-        print(f"\n{'─'*80}")
-        print(f"BULLET: {bullet_id}")
-        print(f"Has Context: {'✅ YES' if has_context else '❌ NO (tests anti-hallucination)'}")
-        print(f"Original: {bullet_text[:100]}...")
-        print(f"{'─'*80}\n")
+        results = []
+        total_tests = len(bullets) * len(job_descriptions)
+        test_num = 0
 
-        for jd in job_descriptions:
-            test_num += 1
-            jd_id = jd['id']
-            jd_type = jd['type']
-            jd_title = jd['title']
-            jd_text = jd['description']
+        print(f"Running {total_tests} test cases ({len(bullets)} bullets × {len(job_descriptions)} job types)...\n")
 
-            print(f"[{test_num}/{total_tests}] Testing against: {jd_title} ({jd_type})")
+        # Test each bullet against each job type
+        for bullet_data in bullets:
+            bullet_id = bullet_data['id']
+            bullet_text = bullet_data['bullet']
+            has_context = bullet_data['has_context']
+            facts = bullet_data['facts']
 
-            try:
-                # Generate optimized bullet
-                optimized = generate_bullet_with_facts(bullet_text, jd_text, facts)
+            print(f"\n{'─'*80}")
+            print(f"BULLET: {bullet_id}")
+            print(f"Has Context: {'✅ YES' if has_context else '❌ NO'}")
+            print(f"Original: {bullet_text[:100]}...")
+            print(f"{'─'*80}\n")
 
-                if verbose:
-                    print(f"  Original:  {bullet_text}")
-                    print(f"  Optimized: {optimized}")
+            for jd in job_descriptions:
+                test_num += 1
+                jd_id = jd['id']
+                jd_type = jd['type']
+                jd_title = jd['title']
+                jd_text = jd['description']
 
-                # Judge the result
-                scores = llm_judge_single_bullet(
-                    bullet_text, optimized, jd_text, jd_type, has_context
-                )
+                print(f"[{test_num}/{total_tests}] {jd_title} ({jd_type})")
 
-                # Print quick summary
-                print(f"  Score: {scores['total']}/10 | " +
-                      f"Rel:{scores['relevance']} Conc:{scores['conciseness']} " +
-                      f"Impact:{scores['impact']} Verbs:{scores['action_verbs']} " +
-                      f"Factual:{scores['factual_accuracy']} KW:{scores['keyword_alignment']}")
+                try:
+                    # Generate optimized bullet using current approach
+                    print(f"  Generating optimized bullet...")
+                    optimized = generator_func(bullet_text, jd_text, facts)
 
-                if verbose and scores.get('issues'):
-                    print(f"  Issues: {', '.join(scores['issues'][:2])}")
+                    if verbose:
+                        print(f"  Original:  {bullet_text}")
+                        print(f"  Optimized: {optimized}")
 
-                # Store result
-                results.append({
-                    'bullet_id': bullet_id,
-                    'has_context': has_context,
-                    'jd_id': jd_id,
-                    'jd_type': jd_type,
-                    'jd_title': jd_title,
-                    'original': bullet_text,
-                    'optimized': optimized,
-                    'scores': scores,
-                    'timestamp': datetime.now().isoformat()
-                })
+                    # Compare original vs optimized (gets baseline, optimized scores, and deltas)
+                    comparison = compare_bullets(
+                        bullet_text, optimized, jd_text, jd_type, has_context, verbose
+                    )
 
-            except Exception as e:
-                log.exception(f"Error testing {bullet_id} with {jd_id}: {e}")
-                print(f"  ❌ ERROR: {str(e)}")
-                results.append({
-                    'bullet_id': bullet_id,
-                    'has_context': has_context,
-                    'jd_id': jd_id,
-                    'jd_type': jd_type,
-                    'jd_title': jd_title,
-                    'original': bullet_text,
-                    'optimized': f"ERROR: {str(e)}",
-                    'scores': {'total': 0, 'error': str(e)},
-                    'timestamp': datetime.now().isoformat()
-                })
+                    baseline = comparison['baseline']
+                    optimized_scores = comparison['optimized']
+                    deltas = comparison['deltas']
 
-    return results
+                    # Print summary with deltas
+                    delta_total = deltas['total']
+                    delta_str = f"+{delta_total:.1f}" if delta_total > 0 else f"{delta_total:.1f}"
+
+                    print(f"  Baseline: {baseline['total']:.1f}/10 → Optimized: {optimized_scores['total']:.1f}/10 ({delta_str})")
+                    print(f"    Rel: {baseline['relevance']}→{optimized_scores['relevance']} ({deltas['relevance']:+.0f}) | " +
+                          f"Conc: {baseline['conciseness']}→{optimized_scores['conciseness']} ({deltas['conciseness']:+.0f}) | " +
+                          f"Impact: {baseline['impact']}→{optimized_scores['impact']} ({deltas['impact']:+.0f})")
+                    print(f"    Verbs: {baseline['action_verbs']}→{optimized_scores['action_verbs']} ({deltas['action_verbs']:+.0f}) | " +
+                          f"Factual: {baseline['factual_accuracy']}→{optimized_scores['factual_accuracy']} ({deltas['factual_accuracy']:+.0f}) | " +
+                          f"KW: {baseline['keyword_alignment']}→{optimized_scores['keyword_alignment']} ({deltas['keyword_alignment']:+.0f})")
+
+                    if verbose and optimized_scores.get('issues'):
+                        print(f"  Issues: {', '.join(optimized_scores['issues'][:2])}")
+
+                    # Store result
+                    results.append({
+                        'bullet_id': bullet_id,
+                        'has_context': has_context,
+                        'jd_id': jd_id,
+                        'jd_type': jd_type,
+                        'jd_title': jd_title,
+                        'original': bullet_text,
+                        'optimized': optimized,
+                        'baseline_scores': baseline,
+                        'optimized_scores': optimized_scores,
+                        'deltas': deltas,
+                        'timestamp': datetime.now().isoformat()
+                    })
+
+                except Exception as e:
+                    log.exception(f"Error testing {bullet_id} with {jd_id}: {e}")
+                    print(f"  ❌ ERROR: {str(e)}")
+                    results.append({
+                        'bullet_id': bullet_id,
+                        'has_context': has_context,
+                        'jd_id': jd_id,
+                        'jd_type': jd_type,
+                        'jd_title': jd_title,
+                        'original': bullet_text,
+                        'optimized': f"ERROR: {str(e)}",
+                        'error': str(e),
+                        'timestamp': datetime.now().isoformat()
+                    })
+
+        results_by_approach[approach_name] = results
+
+    return results_by_approach
 
 
-def print_summary(results: List[Dict]):
-    """Print aggregated summary of evaluation results."""
+def print_summary(results_by_approach: Dict[str, List[Dict]]):
+    """Print aggregated summary of evaluation results with head-to-head comparison."""
 
     print(f"\n\n{'='*80}")
-    print("EVALUATION SUMMARY")
+    print("EVALUATION SUMMARY - HEAD-TO-HEAD COMPARISON")
     print(f"{'='*80}\n")
 
-    # Overall stats
-    total_tests = len(results)
-    avg_score = sum(r['scores'].get('total', 0) for r in results) / total_tests if total_tests > 0 else 0
+    # For each approach, print summary
+    for approach_name, results in results_by_approach.items():
+        print(f"\n{'─'*80}")
+        print(f"{approach_name.upper().replace('_', ' ')} RESULTS")
+        print(f"{'─'*80}\n")
 
-    print(f"Total Tests: {total_tests}")
-    print(f"Average Score: {avg_score:.2f}/10")
-    print(f"")
+        total_tests = len(results)
+        valid_results = [r for r in results if 'deltas' in r]
 
-    # Score distribution
-    score_ranges = {'9-10': 0, '7-8.9': 0, '5-6.9': 0, '3-4.9': 0, '0-2.9': 0}
-    for r in results:
-        score = r['scores'].get('total', 0)
-        if score >= 9: score_ranges['9-10'] += 1
-        elif score >= 7: score_ranges['7-8.9'] += 1
-        elif score >= 5: score_ranges['5-6.9'] += 1
-        elif score >= 3: score_ranges['3-4.9'] += 1
-        else: score_ranges['0-2.9'] += 1
+        if not valid_results:
+            print("  No valid results")
+            continue
 
-    print("Score Distribution:")
-    for range_name, count in score_ranges.items():
-        pct = (count / total_tests * 100) if total_tests > 0 else 0
-        print(f"  {range_name}: {count:3d} ({pct:5.1f}%)")
-    print()
+        # Calculate average scores and improvements
+        avg_baseline = sum(r['baseline_scores']['total'] for r in valid_results) / len(valid_results)
+        avg_optimized = sum(r['optimized_scores']['total'] for r in valid_results) / len(valid_results)
+        avg_delta = sum(r['deltas']['total'] for r in valid_results) / len(valid_results)
 
-    # BY CONTEXT TYPE
-    with_context = [r for r in results if r['has_context']]
-    without_context = [r for r in results if not r['has_context']]
+        print(f"Total Tests: {total_tests}")
+        print(f"Average Baseline:  {avg_baseline:.2f}/10")
+        print(f"Average Optimized: {avg_optimized:.2f}/10")
+        print(f"Average Delta:     {avg_delta:+.2f} points\n")
 
-    avg_with = sum(r['scores'].get('total', 0) for r in with_context) / len(with_context) if with_context else 0
-    avg_without = sum(r['scores'].get('total', 0) for r in without_context) / len(without_context) if without_context else 0
+        # Delta distribution
+        improvements = sum(1 for r in valid_results if r['deltas']['total'] > 0)
+        no_change = sum(1 for r in valid_results if r['deltas']['total'] == 0)
+        regressions = sum(1 for r in valid_results if r['deltas']['total'] < 0)
 
-    print("By Context Type:")
-    print(f"  WITH Context:    {avg_with:.2f}/10 (n={len(with_context)})")
-    print(f"  WITHOUT Context: {avg_without:.2f}/10 (n={len(without_context)})")
-    print()
+        print("Improvement Distribution:")
+        print(f"  Improved:   {improvements:3d} ({improvements/len(valid_results)*100:5.1f}%)")
+        print(f"  No change:  {no_change:3d} ({no_change/len(valid_results)*100:5.1f}%)")
+        print(f"  Regressed:  {regressions:3d} ({regressions/len(valid_results)*100:5.1f}%)\n")
 
-    # BY JOB TYPE
-    print("By Job Type:")
-    job_types = {}
-    for r in results:
-        jt = r['jd_type']
-        if jt not in job_types:
-            job_types[jt] = []
-        job_types[jt].append(r['scores'].get('total', 0))
+        # By context type
+        with_context = [r for r in valid_results if r['has_context']]
+        without_context = [r for r in valid_results if not r['has_context']]
 
-    for jt, scores in sorted(job_types.items()):
-        avg = sum(scores) / len(scores) if scores else 0
-        print(f"  {jt:25s}: {avg:.2f}/10 (n={len(scores)})")
-    print()
+        if with_context:
+            avg_delta_with = sum(r['deltas']['total'] for r in with_context) / len(with_context)
+            print(f"WITH Context:    Δ {avg_delta_with:+.2f} points (n={len(with_context)})")
 
-    # DIMENSION BREAKDOWN
-    print("Average Dimension Scores:")
-    dimensions = ['relevance', 'conciseness', 'impact', 'action_verbs', 'factual_accuracy', 'keyword_alignment']
-    for dim in dimensions:
-        scores = [r['scores'].get(dim, 0) for r in results]
-        avg = sum(scores) / len(scores) if scores else 0
-        print(f"  {dim:20s}: {avg:.2f}/10")
-    print()
+        if without_context:
+            avg_delta_without = sum(r['deltas']['total'] for r in without_context) / len(without_context)
+            print(f"WITHOUT Context: Δ {avg_delta_without:+.2f} points (n={len(without_context)})\n")
 
-    # WORST PERFORMERS (need attention)
-    print("Lowest Scoring Cases (need prompt improvement):")
-    worst = sorted(results, key=lambda x: x['scores'].get('total', 0))[:5]
-    for r in worst:
-        print(f"  {r['scores'].get('total', 0):.1f}/10 | {r['bullet_id']:30s} | {r['jd_type']}")
-        if r['scores'].get('issues'):
-            print(f"         Issues: {', '.join(r['scores']['issues'][:2])}")
-    print()
+        # Dimension breakdown
+        print("Average Delta by Dimension:")
+        dimensions = ['relevance', 'conciseness', 'impact', 'action_verbs', 'factual_accuracy', 'keyword_alignment']
+        for dim in dimensions:
+            deltas = [r['deltas'][dim] for r in valid_results]
+            avg = sum(deltas) / len(deltas) if deltas else 0
+            print(f"  {dim:20s}: {avg:+.2f}")
+        print()
 
-    # BEST PERFORMERS
-    print("Highest Scoring Cases:")
-    best = sorted(results, key=lambda x: x['scores'].get('total', 0), reverse=True)[:5]
-    for r in best:
-        print(f"  {r['scores'].get('total', 0):.1f}/10 | {r['bullet_id']:30s} | {r['jd_type']}")
+        # Best improvements
+        print("Biggest Improvements:")
+        best = sorted(valid_results, key=lambda x: x['deltas']['total'], reverse=True)[:5]
+        for r in best:
+            delta = r['deltas']['total']
+            print(f"  {delta:+.1f} | {r['bullet_id']:30s} | {r['jd_type']}")
+
+        print()
+
+        # Worst cases (regressions or no improvement)
+        print("Cases Needing Attention (lowest delta):")
+        worst = sorted(valid_results, key=lambda x: x['deltas']['total'])[:5]
+        for r in worst:
+            delta = r['deltas']['total']
+            print(f"  {delta:+.1f} | {r['bullet_id']:30s} | {r['jd_type']}")
+
+    # If comparing multiple approaches, do head-to-head
+    if len(results_by_approach) == 2:
+        print(f"\n{'='*80}")
+        print("HEAD-TO-HEAD WINNER")
+        print(f"{'='*80}\n")
+
+        approaches = list(results_by_approach.keys())
+        results1 = [r for r in results_by_approach[approaches[0]] if 'deltas' in r]
+        results2 = [r for r in results_by_approach[approaches[1]] if 'deltas' in r]
+
+        avg_delta1 = sum(r['deltas']['total'] for r in results1) / len(results1) if results1 else 0
+        avg_delta2 = sum(r['deltas']['total'] for r in results2) / len(results2) if results2 else 0
+
+        print(f"{approaches[0]}: Δ {avg_delta1:+.2f} avg improvement")
+        print(f"{approaches[1]}: Δ {avg_delta2:+.2f} avg improvement\n")
+
+        if avg_delta1 > avg_delta2:
+            diff = avg_delta1 - avg_delta2
+            print(f"🏆 WINNER: {approaches[0].upper()} (+{diff:.2f} points better)")
+        elif avg_delta2 > avg_delta1:
+            diff = avg_delta2 - avg_delta1
+            print(f"🏆 WINNER: {approaches[1].upper()} (+{diff:.2f} points better)")
+        else:
+            print("🤝 TIE: Both approaches perform equally")
 
     print(f"\n{'='*80}\n")
 
 
-def save_results(results: List[Dict], output_path: str):
+def save_results(results_by_approach: Dict[str, List[Dict]], output_path: str):
     """Save detailed results to JSON file."""
     output_data = {
         'timestamp': datetime.now().isoformat(),
-        'total_tests': len(results),
-        'results': results
+        'approaches': {}
     }
+
+    for approach_name, results in results_by_approach.items():
+        output_data['approaches'][approach_name] = {
+            'total_tests': len(results),
+            'results': results
+        }
 
     with open(output_path, 'w') as f:
         json.dump(output_data, f, indent=2)
@@ -382,23 +476,25 @@ def save_results(results: List[Dict], output_path: str):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Evaluate prompt performance')
+    parser = argparse.ArgumentParser(description='Evaluate prompt performance - Head-to-Head Comparison')
     parser.add_argument('--bullets', default='bullets.csv', help='Path to bullets CSV file')
     parser.add_argument('--jobs', default='jobs.csv', help='Path to jobs CSV file')
+    parser.add_argument('--approach', default='both', choices=['single', 'scaffolded', 'both'],
+                       help='Which approach to test: single, scaffolded, or both (default: both)')
     parser.add_argument('--save', help='Save detailed results to JSON file')
     parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output')
 
     args = parser.parse_args()
 
     # Run evaluation
-    results = run_evaluation(args.bullets, args.jobs, args.verbose)
+    results_by_approach = run_evaluation(args.bullets, args.jobs, args.verbose, args.approach)
 
     # Print summary
-    print_summary(results)
+    print_summary(results_by_approach)
 
     # Save if requested
     if args.save:
-        save_results(results, args.save)
+        save_results(results_by_approach, args.save)
 
 
 if __name__ == "__main__":

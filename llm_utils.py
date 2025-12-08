@@ -1,7 +1,7 @@
-import re, hashlib
+import re, hashlib, json
 from json import loads
 from typing import List, Dict, Optional, Tuple
-from config import client, CHAT_MODEL, EMBED_MODEL, USE_DISTILLED_JD, USE_LLM_TERMS, log
+from config import client, openai_client, CHAT_MODEL, EMBED_MODEL, USE_DISTILLED_JD, USE_LLM_TERMS, log
 from text_utils import top_terms
 
 _distill_cache: Dict[str, str] = {}
@@ -21,8 +21,8 @@ Return plain text only.
 JOB DESCRIPTION:
 {jd_text}
 """
-    r = client.chat.completions.create(model=CHAT_MODEL, messages=[{"role":"user","content":prompt}], temperature=0)
-    distilled = (r.choices[0].message.content or "").strip()
+    r = client.messages.create(model=CHAT_MODEL, max_tokens=1024, messages=[{"role":"user","content":prompt}], temperature=0)
+    distilled = (r.content[0].text or "").strip()
     if not distilled or len(distilled) < 40: distilled = jd_text
     _distill_cache[h] = distilled
     log.info(f"The distilled job description is {distilled}")
@@ -48,8 +48,8 @@ Output JSON ONLY with those keys and arrays.
 JOB DESCRIPTION:
 {jd_text}
 """
-    r = client.chat.completions.create(model=CHAT_MODEL, messages=[{"role":"user","content":prompt}], temperature=0)
-    raw = (r.choices[0].message.content or "").strip()
+    r = client.messages.create(model=CHAT_MODEL, max_tokens=1024, messages=[{"role":"user","content":prompt}], temperature=0)
+    raw = (r.content[0].text or "").strip()
     try:
         data = loads(raw)
     except Exception:
@@ -67,8 +67,8 @@ JOB DESCRIPTION:
     return out
 
 def embed(text: str) -> List[float]:
-    if not client: return []
-    resp = client.embeddings.create(model=EMBED_MODEL, input=text)
+    if not openai_client: return []
+    resp = openai_client.embeddings.create(model=EMBED_MODEL, input=text)
     return resp.data[0].embedding
 
 def llm_fit_score(resume_text: str, jd_text: str) -> float:
@@ -83,8 +83,8 @@ JOB DESCRIPTION:
 RESUME:
 {resume_text}
 """
-    r = client.chat.completions.create(model=CHAT_MODEL, messages=[{"role":"user","content":prompt}], temperature=0)
-    out = (r.choices[0].message.content or "").strip()
+    r = client.messages.create(model=CHAT_MODEL, max_tokens=64, messages=[{"role":"user","content":prompt}], temperature=0)
+    out = (r.content[0].text or "").strip()
     m = re.search(r"(\d{1,3})", out)
     if not m: return 0.0
     val = max(0, min(100, int(m.group(1))))
@@ -216,13 +216,14 @@ Return ONLY valid JSON in this exact format (no commentary, no code fences):
 Evaluate objectively and independently. Each dimension should be scored 1-10."""
 
     try:
-        r = client.chat.completions.create(
+        r = client.messages.create(
             model=CHAT_MODEL,
+            max_tokens=1024,
             messages=[{"role": "user", "content": prompt}],
             temperature=0  # Deterministic for consistent grading
         )
 
-        raw = (r.choices[0].message.content or "").strip()
+        raw = (r.content[0].text or "").strip()
 
         # Clean potential code fences
         if raw.startswith("```"):
@@ -310,7 +311,7 @@ def should_ask_more_questions(answered_qa: List[Dict[str, str]], bullets: List[s
         Tuple of (should_ask_more, reason)
     """
     if not client:
-        return False, "OpenAI client not available"
+        return False, "Anthropic client not available"
 
     if len(answered_qa) == 0:
         return True, "No questions answered yet"
@@ -339,13 +340,14 @@ Be biased towards YES - only say NO if there are critical missing pieces of info
 Answer with ONLY "YES" or "NO" followed by a brief reason (one sentence).
 Format: YES|reason or NO|reason"""
 
-    r = client.chat.completions.create(
+    r = client.messages.create(
         model=CHAT_MODEL,
+        max_tokens=256,
         messages=[{"role": "user", "content": prompt}],
         temperature=0
     )
 
-    response = (r.choices[0].message.content or "").strip()
+    response = (r.content[0].text or "").strip()
 
     # Parse response
     if response.startswith("YES"):
@@ -429,13 +431,14 @@ VALIDATION CHECKLIST (mentally verify before responding):
 Return ONLY the optimized bullet text. No explanations, no commentary."""
 
     try:
-        log.debug(f"  Calling OpenAI with temperature=0.3")
-        response = client.chat.completions.create(
+        log.debug(f"  Calling Anthropic with temperature=0.3")
+        response = client.messages.create(
             model=CHAT_MODEL,
+            max_tokens=1024,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3  # Slightly higher for variety, still controlled
         )
-        enhanced = response.choices[0].message.content.strip()
+        enhanced = response.content[0].text.strip()
 
         log.info(f"  LLM returned: '{enhanced[:100]}...'")
         log.debug(f"  Full LLM response: '{enhanced}'")
@@ -484,7 +487,7 @@ def generate_bullet_with_facts(original_bullet: str, job_description: str,
         Enhanced bullet string
     """
     if not client:
-        raise RuntimeError("OPENAI_API_KEY missing")
+        raise RuntimeError("ANTHROPIC_API_KEY missing")
 
     # Detect if we have meaningful facts
     has_meaningful_facts = bool(
@@ -619,14 +622,15 @@ REWRITING GUIDELINES:
     log.info(prompt)
     log.info(f"  ===== WITH-FACTS PROMPT END =====")
 
-    log.debug(f"  Calling OpenAI with temperature=0.4 for variety")
-    r = client.chat.completions.create(
+    log.debug(f"  Calling Anthropic with temperature=0.4 for variety")
+    r = client.messages.create(
         model=CHAT_MODEL,
+        max_tokens=1024,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.4  # Higher for structural variety while staying factual
     )
 
-    enhanced_bullet = (r.choices[0].message.content or "").strip()
+    enhanced_bullet = (r.content[0].text or "").strip()
 
     # Clean up any bullet markers or extra formatting
     enhanced_bullet = enhanced_bullet.lstrip("-• ").strip()
@@ -657,7 +661,7 @@ def generate_bullet_with_facts_scaffolded(original_bullet: str, job_description:
         Enhanced bullet string
     """
     if not client:
-        raise RuntimeError("OPENAI_API_KEY missing")
+        raise RuntimeError("ANTHROPIC_API_KEY missing")
 
     # Detect if we have meaningful facts
     has_meaningful_facts = bool(
@@ -732,15 +736,16 @@ Return ONLY valid JSON (no commentary):
   "reasoning": "Brief explanation of why these facts matter most for THIS job"
 }}"""
 
-    log.debug(f"  Selection prompt created, calling OpenAI")
+    log.debug(f"  Selection prompt created, calling Anthropic")
 
-    r1 = client.chat.completions.create(
+    r1 = client.messages.create(
         model=CHAT_MODEL,
+        max_tokens=1024,
         messages=[{"role": "user", "content": selection_prompt}],
         temperature=0  # Deterministic selection
     )
 
-    selection_raw = (r1.choices[0].message.content or "").strip()
+    selection_raw = (r1.content[0].text or "").strip()
 
     # Clean code fences if present
     if selection_raw.startswith("```"):
@@ -800,15 +805,16 @@ WRITING GUIDELINES:
 
 Return ONLY the new bullet."""
 
-    log.debug(f"  Crafting prompt created, calling OpenAI")
+    log.debug(f"  Crafting prompt created, calling Anthropic")
 
-    r2 = client.chat.completions.create(
+    r2 = client.messages.create(
         model=CHAT_MODEL,
+        max_tokens=1024,
         messages=[{"role": "user", "content": crafting_prompt}],
         temperature=0.4  # Allow some variety in phrasing
     )
 
-    enhanced_bullet = (r2.choices[0].message.content or "").strip()
+    enhanced_bullet = (r2.content[0].text or "").strip()
     enhanced_bullet = enhanced_bullet.lstrip("-• ").strip()
 
     log.info(f"  → Scaffolded result: '{enhanced_bullet[:80]}...'")
@@ -830,7 +836,7 @@ def generate_conversational_question(bullet_text: str) -> str:
         A conversational opening question/prompt
     """
     if not client:
-        raise RuntimeError("OPENAI_API_KEY missing")
+        raise RuntimeError("ANTHROPIC_API_KEY missing")
 
     system_prompt = """You are a professional resume coach conducting a friendly interview to understand someone's work experience.
 
@@ -853,16 +859,17 @@ When you have enough detail for a strong bullet (actions + results + context), s
 
 Tell me the story - what did this role actually involve? What were you doing day-to-day, and what results did you achieve?"""
 
-    r = client.chat.completions.create(
+    r = client.messages.create(
         model=CHAT_MODEL,
+        max_tokens=1024,
+        system=system_prompt,
         messages=[
-            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ],
         temperature=0.7
     )
 
-    question = (r.choices[0].message.content or "").strip()
+    question = (r.content[0].text or "").strip()
     log.info(f"Generated conversational question for: {bullet_text[:50]}...")
     return question
 
@@ -881,7 +888,7 @@ def extract_facts_from_conversation(bullet_text: str, conversation_history: str)
         Structured facts dictionary with: situation, actions, results, skills, tools, timeline
     """
     if not client:
-        raise RuntimeError("OPENAI_API_KEY missing")
+        raise RuntimeError("ANTHROPIC_API_KEY missing")
 
     system_prompt = """You are a professional resume expert. Your job is to extract structured facts from a conversation about a work experience.
 
@@ -911,16 +918,17 @@ Conversation:
 
 Extract structured facts from this conversation."""
 
-    r = client.chat.completions.create(
+    r = client.messages.create(
         model=CHAT_MODEL,
+        max_tokens=1024,
+        system=system_prompt,
         messages=[
-            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ],
         temperature=0
     )
 
-    raw = (r.choices[0].message.content or "").strip()
+    raw = (r.content[0].text or "").strip()
 
     try:
         # Clean potential code fences

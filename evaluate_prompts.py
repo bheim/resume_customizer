@@ -154,13 +154,14 @@ Return ONLY valid JSON (no commentary, no code fences):
 Be strict and objective. A mediocre bullet should score 5-6, not 8-9."""
 
     try:
-        r = client.chat.completions.create(
+        r = client.messages.create(
             model=CHAT_MODEL,
+            max_tokens=1024,
             messages=[{"role": "user", "content": prompt}],
             temperature=0
         )
 
-        raw = (r.choices[0].message.content or "").strip()
+        raw = (r.content[0].text or "").strip()
 
         # Clean code fences if present
         if raw.startswith("```"):

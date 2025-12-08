@@ -180,13 +180,14 @@ Key changes made:
 """
 
     try:
-        r = client.chat.completions.create(
+        r = client.messages.create(
             model=CHAT_MODEL,
+            max_tokens=4096,
             messages=[{"role": "user", "content": system_prompt}],
             temperature=0.3  # Slight creativity for improvements
         )
 
-        return (r.choices[0].message.content or "").strip()
+        return (r.content[0].text or "").strip()
 
     except Exception as e:
         log.exception(f"Error getting LLM suggestions: {e}")

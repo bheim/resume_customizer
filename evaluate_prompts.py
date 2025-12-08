@@ -18,7 +18,14 @@ import argparse
 from typing import Dict, List, Any
 from datetime import datetime
 from config import client, CHAT_MODEL, log
-from llm_utils import generate_bullet_with_facts, generate_bullet_with_facts_scaffolded
+from llm_utils import (
+    generate_bullet_with_facts,
+    generate_bullet_with_facts_scaffolded,
+    generate_bullet_self_critique,
+    generate_bullet_multi_candidate,
+    generate_bullet_hiring_manager,
+    generate_bullet_jd_mirror,
+)
 from json import loads
 import re
 
@@ -222,16 +229,30 @@ def compare_bullets(
     }
 
 
-def run_evaluation(bullets_csv: str = "bullets.csv", jobs_csv: str = "jobs.csv", verbose: bool = False, approach: str = "both") -> Dict[str, List[Dict]]:
+def run_evaluation(bullets_csv: str = "bullets.csv", jobs_csv: str = "jobs.csv", verbose: bool = False, approach: str = "all") -> Dict[str, List[Dict]]:
     """
     Run full evaluation across all bullets and job types.
 
     Args:
-        approach: "single", "scaffolded", or "both" (default: "both")
+        approach: "single", "scaffolded", "self_critique", "multi_candidate",
+                  "hiring_manager", "jd_mirror", "all", or "experimental" (new 4 only)
 
     Returns:
-        Dict with "single_stage" and/or "scaffolded" results
+        Dict with results per approach
     """
+
+    # Define all available approaches
+    ALL_APPROACHES = {
+        "single_stage": generate_bullet_with_facts,
+        "scaffolded": generate_bullet_with_facts_scaffolded,
+        "self_critique": generate_bullet_self_critique,
+        "multi_candidate": generate_bullet_multi_candidate,
+        "hiring_manager": generate_bullet_hiring_manager,
+        "jd_mirror": generate_bullet_jd_mirror,
+    }
+
+    EXPERIMENTAL = ["self_critique", "multi_candidate", "hiring_manager", "jd_mirror"]
+    BASELINE = ["single_stage", "scaffolded"]
 
     print(f"\n{'='*80}")
     print("PROMPT EVALUATION - Head-to-Head Comparison")
@@ -246,10 +267,20 @@ def run_evaluation(bullets_csv: str = "bullets.csv", jobs_csv: str = "jobs.csv",
 
     # Determine which approaches to test
     approaches_to_test = []
-    if approach in ["single", "both"]:
-        approaches_to_test.append(("single_stage", generate_bullet_with_facts))
-    if approach in ["scaffolded", "both"]:
-        approaches_to_test.append(("scaffolded", generate_bullet_with_facts_scaffolded))
+    if approach == "all":
+        approaches_to_test = [(name, func) for name, func in ALL_APPROACHES.items()]
+    elif approach == "experimental":
+        approaches_to_test = [(name, ALL_APPROACHES[name]) for name in EXPERIMENTAL]
+    elif approach == "baseline":
+        approaches_to_test = [(name, ALL_APPROACHES[name]) for name in BASELINE]
+    elif approach in ALL_APPROACHES:
+        approaches_to_test = [(approach, ALL_APPROACHES[approach])]
+    else:
+        # Legacy support
+        if approach in ["single", "both"]:
+            approaches_to_test.append(("single_stage", generate_bullet_with_facts))
+        if approach in ["scaffolded", "both"]:
+            approaches_to_test.append(("scaffolded", generate_bullet_with_facts_scaffolded))
 
     for approach_name, generator_func in approaches_to_test:
         print(f"\n{'='*80}")
@@ -429,30 +460,47 @@ def print_summary(results_by_approach: Dict[str, List[Dict]]):
             delta = r['deltas']['total']
             print(f"  {delta:+.1f} | {r['bullet_id']:30s} | {r['jd_type']}")
 
-    # If comparing multiple approaches, do head-to-head
-    if len(results_by_approach) == 2:
+    # If comparing multiple approaches, show leaderboard
+    if len(results_by_approach) >= 2:
         print(f"\n{'='*80}")
-        print("HEAD-TO-HEAD WINNER")
+        print("LEADERBOARD - APPROACH COMPARISON")
         print(f"{'='*80}\n")
 
-        approaches = list(results_by_approach.keys())
-        results1 = [r for r in results_by_approach[approaches[0]] if 'deltas' in r]
-        results2 = [r for r in results_by_approach[approaches[1]] if 'deltas' in r]
+        # Calculate stats for each approach
+        approach_stats = []
+        for name, results in results_by_approach.items():
+            valid = [r for r in results if 'deltas' in r]
+            if valid:
+                avg_delta = sum(r['deltas']['total'] for r in valid) / len(valid)
+                avg_optimized = sum(r['optimized_scores']['total'] for r in valid) / len(valid)
+                improvements = sum(1 for r in valid if r['deltas']['total'] > 0)
+                pct_improved = improvements / len(valid) * 100
+                approach_stats.append({
+                    'name': name,
+                    'avg_delta': avg_delta,
+                    'avg_optimized': avg_optimized,
+                    'pct_improved': pct_improved,
+                    'n': len(valid)
+                })
 
-        avg_delta1 = sum(r['deltas']['total'] for r in results1) / len(results1) if results1 else 0
-        avg_delta2 = sum(r['deltas']['total'] for r in results2) / len(results2) if results2 else 0
+        # Sort by avg_delta (best improvement first)
+        approach_stats.sort(key=lambda x: x['avg_delta'], reverse=True)
 
-        print(f"{approaches[0]}: Δ {avg_delta1:+.2f} avg improvement")
-        print(f"{approaches[1]}: Δ {avg_delta2:+.2f} avg improvement\n")
+        print(f"{'Rank':<5} {'Approach':<20} {'Avg Δ':>8} {'Avg Score':>10} {'% Improved':>12}")
+        print("-" * 60)
+        for i, stats in enumerate(approach_stats, 1):
+            medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else "  "
+            print(f"{medal}{i:<3} {stats['name']:<20} {stats['avg_delta']:>+7.2f} {stats['avg_optimized']:>9.2f} {stats['pct_improved']:>11.1f}%")
 
-        if avg_delta1 > avg_delta2:
-            diff = avg_delta1 - avg_delta2
-            print(f"🏆 WINNER: {approaches[0].upper()} (+{diff:.2f} points better)")
-        elif avg_delta2 > avg_delta1:
-            diff = avg_delta2 - avg_delta1
-            print(f"🏆 WINNER: {approaches[1].upper()} (+{diff:.2f} points better)")
-        else:
-            print("🤝 TIE: Both approaches perform equally")
+        print()
+
+        # Show winner
+        if approach_stats:
+            winner = approach_stats[0]
+            print(f"🏆 WINNER: {winner['name'].upper()}")
+            print(f"   Average improvement: {winner['avg_delta']:+.2f} points")
+            print(f"   Average optimized score: {winner['avg_optimized']:.2f}/10")
+            print(f"   Improved {winner['pct_improved']:.1f}% of bullets")
 
     print(f"\n{'='*80}\n")
 
@@ -480,12 +528,21 @@ def main():
     parser = argparse.ArgumentParser(description='Evaluate prompt performance - Head-to-Head Comparison')
     parser.add_argument('--bullets', default='bullets.csv', help='Path to bullets CSV file')
     parser.add_argument('--jobs', default='jobs.csv', help='Path to jobs CSV file')
-    parser.add_argument('--approach', default='both', choices=['single', 'scaffolded', 'both'],
-                       help='Which approach to test: single, scaffolded, or both (default: both)')
+    parser.add_argument('--approach', default='all',
+                       choices=['single_stage', 'scaffolded', 'self_critique', 'multi_candidate',
+                                'hiring_manager', 'jd_mirror', 'all', 'experimental', 'baseline',
+                                'single', 'both'],  # legacy support
+                       help='Which approach(es) to test (default: all)')
     parser.add_argument('--save', help='Save detailed results to JSON file')
     parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output')
 
     args = parser.parse_args()
+
+    print("\nApproach options:")
+    print("  all          - Test all 6 approaches")
+    print("  experimental - Test 4 new approaches (self_critique, multi_candidate, hiring_manager, jd_mirror)")
+    print("  baseline     - Test 2 original approaches (single_stage, scaffolded)")
+    print("  [name]       - Test specific approach\n")
 
     # Run evaluation
     results_by_approach = run_evaluation(args.bullets, args.jobs, args.verbose, args.approach)

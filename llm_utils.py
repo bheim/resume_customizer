@@ -968,3 +968,264 @@ Extract structured facts from this conversation."""
         }
 
 
+# =============================================================================
+# EXPERIMENTAL APPROACHES FOR A/B TESTING
+# =============================================================================
+
+def _format_facts(stored_facts: Dict) -> str:
+    """Helper to format facts dictionary into readable text."""
+    facts_text = ""
+    if stored_facts.get("situation"):
+        facts_text += f"Context: {stored_facts['situation']}\n"
+    if stored_facts.get("actions"):
+        actions = stored_facts["actions"]
+        if isinstance(actions, list) and actions:
+            facts_text += "Actions: " + "; ".join(actions) + "\n"
+    if stored_facts.get("results"):
+        results = stored_facts["results"]
+        if isinstance(results, list) and results:
+            facts_text += "Results: " + "; ".join(results) + "\n"
+    if stored_facts.get("skills"):
+        skills = stored_facts["skills"]
+        if isinstance(skills, list) and skills:
+            facts_text += f"Skills: {', '.join(skills)}\n"
+    if stored_facts.get("tools"):
+        tools = stored_facts["tools"]
+        if isinstance(tools, list) and tools:
+            facts_text += f"Tools: {', '.join(tools)}\n"
+    if stored_facts.get("timeline"):
+        facts_text += f"Timeline: {stored_facts['timeline']}\n"
+    return facts_text.strip()
+
+
+def generate_bullet_self_critique(original_bullet: str, job_description: str,
+                                   stored_facts: Dict, char_limit: Optional[int] = None) -> str:
+    """
+    Self-Critique Loop: Generate -> Critique -> Revise
+    """
+    if not client:
+        raise RuntimeError("ANTHROPIC_API_KEY missing")
+
+    has_facts = bool(stored_facts and any(stored_facts.get(c) for c in ["tools", "skills", "actions", "results", "situation", "timeline"]))
+    facts_text = _format_facts(stored_facts) if has_facts else ""
+    char_text = f"\nKeep under {char_limit} characters." if char_limit else ""
+
+    log.info(f"generate_bullet_self_critique - '{original_bullet[:50]}...'")
+
+    # STAGE 1: Generate
+    if has_facts:
+        gen_prompt = f"""Optimize this bullet for the job using verified facts.
+
+ORIGINAL: {original_bullet}
+JD: {job_description}
+FACTS: {facts_text}
+
+Write one optimized bullet with strong verb, best metric, JD alignment.{char_text}
+Return ONLY the bullet."""
+    else:
+        gen_prompt = f"""Optimize this bullet for the job. PRESERVE all original facts - add nothing new.
+
+ORIGINAL: {original_bullet}
+JD: {job_description}
+
+Strengthen verb, improve structure, align terminology.{char_text}
+Return ONLY the bullet."""
+
+    r1 = client.messages.create(model=CHAT_MODEL, max_tokens=512, messages=[{"role": "user", "content": gen_prompt}], temperature=0.4)
+    draft = (r1.content[0].text or "").strip().lstrip("-• ")
+    log.info(f"  Draft: '{draft[:60]}...'")
+
+    # STAGE 2: Critique
+    critique_prompt = f"""You're a hiring manager. Critique this bullet for this role.
+
+JD: {job_description}
+BULLET: {draft}
+
+List 2-3 specific improvements needed (relevance, impact clarity, verb strength, conciseness, ending)."""
+
+    r2 = client.messages.create(model=CHAT_MODEL, max_tokens=512, messages=[{"role": "user", "content": critique_prompt}], temperature=0.2)
+    critique = (r2.content[0].text or "").strip()
+    log.info(f"  Critique: '{critique[:60]}...'")
+
+    # STAGE 3: Revise
+    revise_prompt = f"""Revise this bullet based on the critique.
+
+BULLET: {draft}
+CRITIQUE: {critique}
+{"FACTS: " + facts_text if has_facts else "IMPORTANT: Add nothing not in original."}
+
+Address each point.{char_text}
+Return ONLY the revised bullet."""
+
+    r3 = client.messages.create(model=CHAT_MODEL, max_tokens=512, messages=[{"role": "user", "content": revise_prompt}], temperature=0.3)
+    final = (r3.content[0].text or "").strip().lstrip("-• ")
+    log.info(f"  Final: '{final[:60]}...'")
+    return final
+
+
+def generate_bullet_multi_candidate(original_bullet: str, job_description: str,
+                                     stored_facts: Dict, char_limit: Optional[int] = None) -> str:
+    """
+    Multi-Candidate: Generate 3 variants -> Select best
+    """
+    if not client:
+        raise RuntimeError("ANTHROPIC_API_KEY missing")
+
+    has_facts = bool(stored_facts and any(stored_facts.get(c) for c in ["tools", "skills", "actions", "results", "situation", "timeline"]))
+    facts_text = _format_facts(stored_facts) if has_facts else ""
+    char_text = f"\nEach under {char_limit} chars." if char_limit else ""
+
+    log.info(f"generate_bullet_multi_candidate - '{original_bullet[:50]}...'")
+
+    # STAGE 1: Generate 3 candidates
+    if has_facts:
+        gen_prompt = f"""Generate 3 DIFFERENT bullet versions for this job.
+
+ORIGINAL: {original_bullet}
+JD: {job_description}
+FACTS: {facts_text}
+
+Make each distinct: different verbs, structures (impact-first vs action-first), emphasis (skills vs results vs leadership).{char_text}
+
+VERSION 1: [bullet]
+VERSION 2: [bullet]
+VERSION 3: [bullet]"""
+    else:
+        gen_prompt = f"""Generate 3 DIFFERENT bullet versions. PRESERVE all original facts.
+
+ORIGINAL: {original_bullet}
+JD: {job_description}
+
+Make each distinct: different verbs, structures, emphasis.{char_text}
+
+VERSION 1: [bullet]
+VERSION 2: [bullet]
+VERSION 3: [bullet]"""
+
+    r1 = client.messages.create(model=CHAT_MODEL, max_tokens=1024, messages=[{"role": "user", "content": gen_prompt}], temperature=0.7)
+    candidates = (r1.content[0].text or "").strip()
+    log.info(f"  Generated 3 candidates")
+
+    # STAGE 2: Select best
+    select_prompt = f"""You're hiring for this role. Pick the BEST bullet.
+
+JD: {job_description}
+
+CANDIDATES:
+{candidates}
+
+Evaluate: relevance, impact clarity, language strength, conciseness.
+Return ONLY the winning bullet text (no "VERSION X:", just the bullet)."""
+
+    r2 = client.messages.create(model=CHAT_MODEL, max_tokens=256, messages=[{"role": "user", "content": select_prompt}], temperature=0)
+    selected = (r2.content[0].text or "").strip().lstrip("-• ")
+    for prefix in ["VERSION 1:", "VERSION 2:", "VERSION 3:", "Winner:", "Best:"]:
+        if selected.upper().startswith(prefix.upper()):
+            selected = selected[len(prefix):].strip()
+    log.info(f"  Selected: '{selected[:60]}...'")
+    return selected
+
+
+def generate_bullet_hiring_manager(original_bullet: str, job_description: str,
+                                    stored_facts: Dict, char_limit: Optional[int] = None) -> str:
+    """
+    Hiring Manager Perspective: Write as the evaluator
+    """
+    if not client:
+        raise RuntimeError("ANTHROPIC_API_KEY missing")
+
+    has_facts = bool(stored_facts and any(stored_facts.get(c) for c in ["tools", "skills", "actions", "results", "situation", "timeline"]))
+    facts_text = _format_facts(stored_facts) if has_facts else ""
+    char_text = f"\nKeep under {char_limit} characters." if char_limit else ""
+
+    log.info(f"generate_bullet_hiring_manager - '{original_bullet[:50]}...'")
+
+    system = """You're an experienced hiring manager. You know what makes bullets stand out:
+- Specific beats vague
+- Numbers catch the eye
+- Strong verbs show ownership (Led, Built, Drove) vs weak (Helped, Assisted)
+- Relevance to job trumps impressiveness
+- Concise gets read; long gets skimmed
+- End strong, don't trail off"""
+
+    if has_facts:
+        user = f"""I'm hiring for:
+{job_description}
+
+Candidate experience:
+ORIGINAL: {original_bullet}
+DETAILS: {facts_text}
+
+Rewrite so I'd want to interview them. Use only verified details.{char_text}
+Return ONLY the bullet."""
+    else:
+        user = f"""I'm hiring for:
+{job_description}
+
+Candidate bullet:
+{original_bullet}
+
+Rewrite so I'd want to interview them. ONLY use info from original - add nothing.{char_text}
+Return ONLY the bullet."""
+
+    r = client.messages.create(model=CHAT_MODEL, max_tokens=512, system=system, messages=[{"role": "user", "content": user}], temperature=0.4)
+    result = (r.content[0].text or "").strip().lstrip("-• ")
+    log.info(f"  Result: '{result[:60]}...'")
+    return result
+
+
+def generate_bullet_jd_mirror(original_bullet: str, job_description: str,
+                               stored_facts: Dict, char_limit: Optional[int] = None) -> str:
+    """
+    JD-Mirroring: Extract JD phrases -> Incorporate them
+    """
+    if not client:
+        raise RuntimeError("ANTHROPIC_API_KEY missing")
+
+    has_facts = bool(stored_facts and any(stored_facts.get(c) for c in ["tools", "skills", "actions", "results", "situation", "timeline"]))
+    facts_text = _format_facts(stored_facts) if has_facts else ""
+    char_text = f"\nKeep under {char_limit} characters." if char_limit else ""
+
+    log.info(f"generate_bullet_jd_mirror - '{original_bullet[:50]}...'")
+
+    # STAGE 1: Extract JD phrases
+    extract_prompt = f"""Extract 3-5 specific JD phrases matching the candidate's experience.
+
+JD: {job_description}
+
+EXPERIENCE: {original_bullet}
+{("DETAILS: " + facts_text) if has_facts else ""}
+
+Return phrases (one per line) that:
+- Match candidate's demonstrated skills/actions
+- Are specific (not "team player")
+- Help ATS matching"""
+
+    r1 = client.messages.create(model=CHAT_MODEL, max_tokens=256, messages=[{"role": "user", "content": extract_prompt}], temperature=0)
+    phrases = (r1.content[0].text or "").strip()
+    log.info(f"  JD phrases: '{phrases[:60]}...'")
+
+    # STAGE 2: Rewrite with phrases
+    if has_facts:
+        rewrite = f"""Rewrite to naturally incorporate JD phrases.
+
+ORIGINAL: {original_bullet}
+JD PHRASES: {phrases}
+FACTS: {facts_text}
+
+Use 2-3 phrases naturally. Strong verb, best metric.{char_text}
+Return ONLY the bullet."""
+    else:
+        rewrite = f"""Rewrite to naturally incorporate JD phrases.
+
+ORIGINAL: {original_bullet}
+JD PHRASES: {phrases}
+
+Use 2-3 phrases naturally. PRESERVE original facts - add nothing new.{char_text}
+Return ONLY the bullet."""
+
+    r2 = client.messages.create(model=CHAT_MODEL, max_tokens=512, messages=[{"role": "user", "content": rewrite}], temperature=0.3)
+    result = (r2.content[0].text or "").strip().lstrip("-• ")
+    log.info(f"  Result: '{result[:60]}...'")
+    return result
+

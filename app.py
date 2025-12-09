@@ -669,7 +669,7 @@ async def generate_resume_with_facts(request: BulletGenerationRequest):
 
     try:
         from db_utils_optimized import match_bullet_with_confidence_optimized
-        from llm_utils import embed, generate_bullet_with_facts
+        from llm_utils import embed, generate_bullet_self_critique
         from db_utils import get_bullet_facts
 
         # For each bullet, try to find stored facts
@@ -686,7 +686,7 @@ async def generate_resume_with_facts(request: BulletGenerationRequest):
             if not bullet_item.use_stored_facts:
                 # User chose not to use stored facts - optimize without facts
                 log.info(f"Bullet {idx} opted out of using stored facts, optimizing without facts")
-                enhanced_text = generate_bullet_with_facts(
+                enhanced_text = generate_bullet_self_critique(
                     bullet_text,
                     request.job_description,
                     {}  # Empty facts dict triggers no-facts optimization path
@@ -715,7 +715,7 @@ async def generate_resume_with_facts(request: BulletGenerationRequest):
                 if facts:
                     # Generate with facts
                     log.info(f"Generating bullet {idx} with stored facts (bullet_id: {bullet_id})")
-                    enhanced_text = generate_bullet_with_facts(
+                    enhanced_text = generate_bullet_self_critique(
                         bullet_text,
                         request.job_description,
                         facts
@@ -725,7 +725,7 @@ async def generate_resume_with_facts(request: BulletGenerationRequest):
                 else:
                     # Generate without facts (still optimize using job description)
                     log.info(f"Bullet {idx} has no stored facts, optimizing without facts")
-                    enhanced_text = generate_bullet_with_facts(
+                    enhanced_text = generate_bullet_self_critique(
                         bullet_text,
                         request.job_description,
                         {}  # Empty facts dict

@@ -25,6 +25,8 @@ from llm_utils import (
     generate_bullet_multi_candidate,
     generate_bullet_hiring_manager,
     generate_bullet_jd_mirror,
+    generate_bullet_combined,
+    generate_bullets_batch,
 )
 from json import loads
 import re
@@ -279,9 +281,14 @@ def run_evaluation(bullets_csv: str = "bullets.csv", jobs_csv: str = "jobs.csv",
         "multi_candidate": generate_bullet_multi_candidate,
         "hiring_manager": generate_bullet_hiring_manager,
         "jd_mirror": generate_bullet_jd_mirror,
+        "combined": generate_bullet_combined,
     }
 
+    # Batch approach requires special handling (defined below)
+    BATCH_APPROACH = "batch"
+
     EXPERIMENTAL = ["self_critique", "multi_candidate", "hiring_manager", "jd_mirror"]
+    NEW_APPROACHES = ["combined", "batch"]  # The two newest approaches
     BASELINE = ["single_stage", "scaffolded"]
 
     print(f"\n{'='*80}")
@@ -297,12 +304,20 @@ def run_evaluation(bullets_csv: str = "bullets.csv", jobs_csv: str = "jobs.csv",
 
     # Determine which approaches to test
     approaches_to_test = []
+    include_batch = False
+
     if approach == "all":
         approaches_to_test = [(name, func) for name, func in ALL_APPROACHES.items()]
+        include_batch = True
     elif approach == "experimental":
         approaches_to_test = [(name, ALL_APPROACHES[name]) for name in EXPERIMENTAL]
     elif approach == "baseline":
         approaches_to_test = [(name, ALL_APPROACHES[name]) for name in BASELINE]
+    elif approach == "new":
+        approaches_to_test = [(name, ALL_APPROACHES[name]) for name in NEW_APPROACHES if name in ALL_APPROACHES]
+        include_batch = True
+    elif approach == "batch":
+        include_batch = True
     elif approach in ALL_APPROACHES:
         approaches_to_test = [(approach, ALL_APPROACHES[approach])]
     else:
@@ -410,6 +425,85 @@ def run_evaluation(bullets_csv: str = "bullets.csv", jobs_csv: str = "jobs.csv",
                     })
 
         results_by_approach[approach_name] = results
+
+    # Handle batch approach separately (processes all bullets together per JD)
+    if include_batch:
+        print(f"\n{'='*80}")
+        print(f"TESTING: BATCH (processes all bullets together)")
+        print(f"{'='*80}\n")
+
+        results = []
+        test_num = 0
+
+        for jd in job_descriptions:
+            jd_id = jd['id']
+            jd_type = jd['type']
+            jd_title = jd['title']
+            jd_text = jd['description']
+
+            print(f"\n{'─'*80}")
+            print(f"JOB: {jd_title} ({jd_type})")
+            print(f"Processing {len(bullets)} bullets as a batch...")
+            print(f"{'─'*80}\n")
+
+            try:
+                # Prepare batch data
+                bullets_data = [
+                    {"original_bullet": b['bullet'], "stored_facts": b['facts']}
+                    for b in bullets
+                ]
+
+                # Generate all bullets together
+                optimized_bullets = generate_bullets_batch(bullets_data, jd_text)
+
+                # Score each bullet individually
+                for i, (bullet_data, optimized) in enumerate(zip(bullets, optimized_bullets)):
+                    test_num += 1
+                    bullet_id = bullet_data['id']
+                    bullet_text = bullet_data['bullet']
+                    has_context = bullet_data['has_context']
+                    facts = bullet_data['facts']
+
+                    print(f"[{test_num}] {bullet_id}")
+
+                    if verbose:
+                        print(f"  Original:  {bullet_text}")
+                        print(f"  Optimized: {optimized}")
+
+                    # Compare original vs optimized
+                    comparison = compare_bullets(
+                        bullet_text, optimized, jd_text, jd_type, has_context, verbose,
+                        facts=facts
+                    )
+
+                    baseline = comparison['baseline']
+                    optimized_scores = comparison['optimized']
+                    deltas = comparison['deltas']
+
+                    delta_total = deltas['total']
+                    delta_str = f"+{delta_total:.1f}" if delta_total > 0 else f"{delta_total:.1f}"
+
+                    print(f"  Baseline: {baseline['total']:.1f}/10 → Optimized: {optimized_scores['total']:.1f}/10 ({delta_str})")
+
+                    results.append({
+                        'bullet_id': bullet_id,
+                        'has_context': has_context,
+                        'jd_id': jd_id,
+                        'jd_type': jd_type,
+                        'jd_title': jd_title,
+                        'original': bullet_text,
+                        'optimized': optimized,
+                        'baseline_scores': baseline,
+                        'optimized_scores': optimized_scores,
+                        'deltas': deltas,
+                        'timestamp': datetime.now().isoformat()
+                    })
+
+            except Exception as e:
+                log.exception(f"Error in batch processing for {jd_id}: {e}")
+                print(f"  ❌ ERROR: {str(e)}")
+
+        results_by_approach["batch"] = results
 
     return results_by_approach
 
@@ -561,7 +655,8 @@ def main():
     parser.add_argument('--jobs', default='jobs.csv', help='Path to jobs CSV file')
     parser.add_argument('--approach', default='all',
                        choices=['single_stage', 'scaffolded', 'self_critique', 'multi_candidate',
-                                'hiring_manager', 'jd_mirror', 'all', 'experimental', 'baseline',
+                                'hiring_manager', 'jd_mirror', 'combined', 'batch',
+                                'all', 'experimental', 'baseline', 'new',
                                 'single', 'both'],  # legacy support
                        help='Which approach(es) to test (default: all)')
     parser.add_argument('--save', help='Save detailed results to JSON file')
@@ -570,10 +665,11 @@ def main():
     args = parser.parse_args()
 
     print("\nApproach options:")
-    print("  all          - Test all 6 approaches")
-    print("  experimental - Test 4 new approaches (self_critique, multi_candidate, hiring_manager, jd_mirror)")
+    print("  all          - Test all 8 approaches")
+    print("  new          - Test 2 newest approaches (combined, batch)")
+    print("  experimental - Test 4 approaches (self_critique, multi_candidate, hiring_manager, jd_mirror)")
     print("  baseline     - Test 2 original approaches (single_stage, scaffolded)")
-    print("  [name]       - Test specific approach\n")
+    print("  [name]       - Test specific approach (combined, batch, etc.)\n")
 
     # Run evaluation
     results_by_approach = run_evaluation(args.bullets, args.jobs, args.verbose, args.approach)

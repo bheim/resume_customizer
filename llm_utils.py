@@ -1161,3 +1161,233 @@ Return ONLY the bullet."""
     log.info(f"  Result: '{result[:60]}...'")
     return result
 
+
+def generate_bullet_combined(original_bullet: str, job_description: str,
+                              stored_facts: Dict, char_limit: Optional[int] = None) -> str:
+    """
+    Combined Multi-Candidate + Self-Critique:
+    1. Generate 3 candidate bullets
+    2. Critique each for factual accuracy
+    3. Select the best one that passes factual check
+
+    This combines the creativity of multi-candidate with the factual rigor of self-critique.
+    """
+    if not client:
+        raise RuntimeError("ANTHROPIC_API_KEY missing")
+
+    has_facts = bool(stored_facts and any(stored_facts.get(c) for c in ["tools", "skills", "actions", "results", "situation", "timeline"]))
+    facts_text = _format_facts(stored_facts) if has_facts else ""
+    char_text = f"\nEach under {char_limit} chars." if char_limit else ""
+    source = f"VERIFIED FACTS:\n{facts_text}" if has_facts else f"ORIGINAL BULLET:\n{original_bullet}"
+
+    log.info(f"generate_bullet_combined - '{original_bullet[:50]}...'")
+
+    # STAGE 1: Generate 3 candidates (same as multi_candidate)
+    gen_prompt = f"""You are a resume writer who NEVER invents information.
+
+{source}
+
+JOB DESCRIPTION:
+{job_description}
+
+⚠️ CONSTRAINT: Each version can ONLY use information from the source above.
+- No added metrics, tools, or details
+- If fit is poor, that's OK - write honest variations
+
+Generate 3 different versions (vary structure and emphasis, NOT facts):
+{char_text}
+VERSION 1: [bullet]
+VERSION 2: [bullet]
+VERSION 3: [bullet]"""
+
+    r1 = client.messages.create(model=CHAT_MODEL, max_tokens=1024, messages=[{"role": "user", "content": gen_prompt}], temperature=0.3)
+    candidates_raw = (r1.content[0].text or "").strip()
+    log.info(f"  Generated 3 candidates")
+
+    # STAGE 2: Critique ALL candidates for factual accuracy
+    critique_prompt = f"""Review these 3 bullet candidates for FACTUAL ACCURACY.
+
+SOURCE MATERIAL (the ONLY allowed information):
+{source}
+
+CANDIDATES:
+{candidates_raw}
+
+For EACH candidate, check:
+1. Does it contain ANY information not in the source? (CRITICAL FAILURE)
+2. Does it add metrics, tools, or details not in source? (FAILURE)
+3. Is it relevant to job and concise? (Quality check)
+
+Score each 1-5 on factual accuracy (5 = perfectly faithful, 1 = fabricates information).
+Return as:
+VERSION 1: [score] - [brief reason]
+VERSION 2: [score] - [brief reason]
+VERSION 3: [score] - [brief reason]
+BEST: [version number]"""
+
+    r2 = client.messages.create(model=CHAT_MODEL, max_tokens=512, messages=[{"role": "user", "content": critique_prompt}], temperature=0)
+    critique = (r2.content[0].text or "").strip()
+    log.info(f"  Critique: '{critique[:100]}...'")
+
+    # STAGE 3: Revise the best candidate based on critique
+    revise_prompt = f"""Based on the critique, select and refine the best bullet.
+
+CANDIDATES:
+{candidates_raw}
+
+CRITIQUE:
+{critique}
+
+SOURCE (your ONLY allowed information):
+{source}
+
+Take the version with highest factual accuracy score.
+If it had any issues noted, fix them by REMOVING fabricated information (not adding more).
+A modest honest bullet beats an impressive lie.
+{char_text}
+Return ONLY the final refined bullet."""
+
+    r3 = client.messages.create(model=CHAT_MODEL, max_tokens=256, messages=[{"role": "user", "content": revise_prompt}], temperature=0.1)
+    final = (r3.content[0].text or "").strip().lstrip("-• ")
+
+    # Clean up any version prefixes
+    for prefix in ["VERSION 1:", "VERSION 2:", "VERSION 3:", "Winner:", "Best:", "FINAL:"]:
+        if final.upper().startswith(prefix.upper()):
+            final = final[len(prefix):].strip()
+
+    log.info(f"  Final: '{final[:60]}...'")
+    return final
+
+
+def generate_bullets_batch(bullets_data: List[Dict], job_description: str,
+                           char_limit: Optional[int] = None) -> List[str]:
+    """
+    Batch Bullet Processing: Process multiple bullets together for coherent output.
+
+    This approach:
+    1. Sees all bullets at once for context
+    2. Ensures variety across bullets (no repetitive phrasing)
+    3. Strategically distributes keywords across the set
+
+    Args:
+        bullets_data: List of dicts with 'original_bullet' and 'stored_facts' keys
+        job_description: Target job description
+        char_limit: Optional character limit per bullet
+
+    Returns:
+        List of enhanced bullets in same order as input
+    """
+    if not client:
+        raise RuntimeError("ANTHROPIC_API_KEY missing")
+
+    if not bullets_data:
+        return []
+
+    log.info(f"generate_bullets_batch - Processing {len(bullets_data)} bullets together")
+
+    # Format all bullets with their facts
+    bullets_formatted = []
+    for i, item in enumerate(bullets_data, 1):
+        original = item.get("original_bullet", "")
+        facts = item.get("stored_facts", {})
+        has_facts = bool(facts and any(facts.get(c) for c in ["tools", "skills", "actions", "results", "situation", "timeline"]))
+
+        if has_facts:
+            facts_text = _format_facts(facts)
+            bullets_formatted.append(f"BULLET {i}:\nOriginal: {original}\nFacts: {facts_text}")
+        else:
+            bullets_formatted.append(f"BULLET {i}:\nOriginal: {original}\nFacts: (none - preserve original information)")
+
+    bullets_section = "\n\n".join(bullets_formatted)
+    char_text = f"\nKeep each bullet under {char_limit} characters." if char_limit else ""
+
+    # Single-stage batch generation with coherence instructions
+    batch_prompt = f"""You are a resume writer optimizing a SET of bullets together. NEVER invent information.
+
+JOB DESCRIPTION:
+{job_description}
+
+BULLETS TO OPTIMIZE:
+{bullets_section}
+
+⚠️ CRITICAL CONSTRAINTS:
+- For each bullet, use ONLY the facts provided (or original if no facts)
+- Do NOT add metrics, tools, or details not in the source
+- If a bullet doesn't fit the job well, write the best honest version
+
+BATCH OPTIMIZATION GOALS:
+1. Vary sentence structures across bullets (don't start all with same pattern)
+2. Distribute JD keywords strategically (don't repeat same keywords in every bullet)
+3. Lead with strongest/most relevant bullets' content
+4. Ensure each bullet stands alone but together tells a cohesive story
+{char_text}
+
+Return exactly {len(bullets_data)} bullets, numbered:
+1. [bullet]
+2. [bullet]
+...
+
+Return ONLY the numbered bullets, no commentary."""
+
+    r = client.messages.create(model=CHAT_MODEL, max_tokens=2048, messages=[{"role": "user", "content": batch_prompt}], temperature=0.2)
+    response = (r.content[0].text or "").strip()
+
+    # Parse numbered bullets from response
+    enhanced_bullets = []
+    lines = response.split("\n")
+    current_bullet = ""
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        # Check if line starts with a number
+        match = re.match(r'^(\d+)[.):]\s*(.+)$', line)
+        if match:
+            if current_bullet:
+                enhanced_bullets.append(current_bullet.lstrip("-• "))
+            current_bullet = match.group(2)
+        elif current_bullet:
+            # Continuation of previous bullet
+            current_bullet += " " + line
+
+    # Don't forget the last bullet
+    if current_bullet:
+        enhanced_bullets.append(current_bullet.lstrip("-• "))
+
+    # Ensure we have the right number of bullets
+    while len(enhanced_bullets) < len(bullets_data):
+        # Fallback: use original bullet
+        idx = len(enhanced_bullets)
+        enhanced_bullets.append(bullets_data[idx].get("original_bullet", ""))
+        log.warning(f"  Bullet {idx+1} missing from batch response, using original")
+
+    # Trim if we got too many
+    enhanced_bullets = enhanced_bullets[:len(bullets_data)]
+
+    for i, bullet in enumerate(enhanced_bullets):
+        log.info(f"  Bullet {i+1}: '{bullet[:60]}...'")
+
+    return enhanced_bullets
+
+
+def generate_bullet_batch_wrapper(original_bullet: str, job_description: str,
+                                   stored_facts: Dict, char_limit: Optional[int] = None,
+                                   _batch_context: Optional[Dict] = None) -> str:
+    """
+    Wrapper for batch processing that works with the single-bullet evaluation interface.
+
+    For proper batch processing, call generate_bullets_batch directly.
+    This wrapper exists for API compatibility with the evaluation framework.
+
+    When _batch_context is provided, it uses pre-computed batch results.
+    Otherwise, it processes the single bullet (losing batch benefits).
+    """
+    if _batch_context and original_bullet in _batch_context:
+        return _batch_context[original_bullet]
+
+    # Fallback: process single bullet (not ideal, but maintains compatibility)
+    bullets_data = [{"original_bullet": original_bullet, "stored_facts": stored_facts}]
+    results = generate_bullets_batch(bullets_data, job_description, char_limit)
+    return results[0] if results else original_bullet
+

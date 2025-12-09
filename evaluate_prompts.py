@@ -83,7 +83,9 @@ def llm_judge_single_bullet(
     jd: str,
     jd_type: str,
     has_context: bool,
-    bullet_label: str = "BULLET"
+    bullet_label: str = "BULLET",
+    original_bullet: str = None,
+    facts: Dict = None
 ) -> Dict[str, Any]:
     """
     Use LLM as judge to evaluate a single bullet.
@@ -93,57 +95,79 @@ def llm_judge_single_bullet(
     2. Conciseness (punchy vs verbose)
     3. Impact/Metrics clarity
     4. Action verb strength
-    5. Factual accuracy (no hallucination if no context)
+    5. Factual accuracy (compared to source material)
     6. JD keyword alignment
     """
 
-    context_note = "NO CONTEXT - Penalize hallucination" if not has_context else "WITH CONTEXT - Penalize adding unverified info"
+    # Build source material section for factual accuracy check
+    if original_bullet and bullet_label == "OPTIMIZED":
+        if has_context and facts:
+            facts_text = []
+            if facts.get("situation"): facts_text.append(f"Context: {facts['situation']}")
+            if facts.get("actions"): facts_text.append(f"Actions: {'; '.join(facts['actions'])}")
+            if facts.get("results"): facts_text.append(f"Results: {'; '.join(facts['results'])}")
+            if facts.get("skills"): facts_text.append(f"Skills: {', '.join(facts['skills'])}")
+            if facts.get("tools"): facts_text.append(f"Tools: {', '.join(facts['tools'])}")
+            source_section = f"""
+SOURCE MATERIAL (for factual accuracy check):
+Original bullet: {original_bullet}
+Verified facts:
+{chr(10).join(facts_text) if facts_text else 'None provided'}
+"""
+        else:
+            source_section = f"""
+SOURCE MATERIAL (for factual accuracy check):
+Original bullet: {original_bullet}
+(No additional facts provided - optimized should NOT add any information)
+"""
+        factual_instruction = """5. **Factual Accuracy** (1-10) - COMPARE TO SOURCE ABOVE
+   - Does the optimized bullet contain ONLY information from the source material?
+   - Any added metrics, tools, or details = LOW SCORE (1-4)
+   - Rephrasing is OK, inventing is NOT
+   - This is the MOST IMPORTANT dimension"""
+    else:
+        source_section = ""
+        factual_instruction = """5. **Factual Accuracy** (1-10)
+   - Does this bullet seem grounded and believable?
+   - Score based on specificity vs vagueness"""
 
-    prompt = f"""You are evaluating a resume bullet for quality and adherence to best practices.
+    prompt = f"""You are evaluating a resume bullet for quality.
 
 {bullet_label}:
 {bullet}
-
+{source_section}
 JOB TYPE: {jd_type}
 JOB DESCRIPTION:
 {jd}
-
-CONTEXT: {context_note}
 
 ---
 
 Score this bullet on these 6 dimensions (1-10 scale):
 
 1. **Relevance to JD** (1-10)
-   - Does it align with the job's key skills, technologies, and responsibilities?
-   - Would a hiring manager see this as relevant experience?
+   - Does it align with the job's key responsibilities?
+   - Would a hiring manager see this as relevant?
 
 2. **Conciseness** (1-10)
-   - Is it tight and punchy, or verbose with filler words?
-   - Does it end strong, or trail off with vague clauses?
-   - Are there unnecessary words like "comprehensive", "utilizing", "through data-driven insights"?
+   - Tight and punchy, or verbose?
+   - Does it end strong or trail off?
 
 3. **Impact & Metrics** (1-10)
-   - Are achievements quantified clearly?
-   - Is the business impact evident?
-   - Are metrics stated once in their most compelling form (not repeated)?
+   - Are achievements clear?
+   - Is business impact evident?
 
 4. **Action Verbs** (1-10)
-   - Strong ownership language (Developed, Led, Built)?
-   - Or weak verbs (Helped with, Supported, Streamlined)?
-   - Does it demonstrate initiative?
+   - Strong ownership (Developed, Led, Built)?
+   - Or weak verbs (Helped, Supported)?
 
-5. **Factual Accuracy** (1-10)
-   {'- NO CONTEXT: Did it invent metrics, technologies, or details not in original?' if not has_context else '- WITH CONTEXT: Did it stick to provided facts without adding extras?'}
-   {'- This is CRITICAL - any hallucination = instant low score' if not has_context else '- Should only use information from the verified facts'}
+{factual_instruction}
 
 6. **JD Keyword Alignment** (1-10)
-   - Does it use relevant terminology from the job description?
-   - Are key technologies/skills mentioned (when appropriate)?
+   - Uses relevant JD terminology?
 
 ---
 
-Return ONLY valid JSON (no commentary, no code fences):
+Return ONLY valid JSON:
 
 {{
   "relevance": X,
@@ -153,12 +177,12 @@ Return ONLY valid JSON (no commentary, no code fences):
   "factual_accuracy": X,
   "keyword_alignment": X,
   "total": X.X (average of above 6),
-  "reasoning": "2-3 sentence explanation of scores",
-  "issues": ["list", "of", "specific", "problems"],
-  "strengths": ["list", "of", "what", "worked", "well"]
+  "reasoning": "2-3 sentence explanation",
+  "issues": ["specific", "problems"],
+  "strengths": ["what", "worked"]
 }}
 
-Be strict and objective. A mediocre bullet should score 5-6, not 8-9."""
+Be strict. If optimized bullet added information not in source, factual_accuracy must be 1-4."""
 
     try:
         r = client.messages.create(
@@ -201,18 +225,24 @@ def compare_bullets(
     jd: str,
     jd_type: str,
     has_context: bool,
-    verbose: bool = False
+    verbose: bool = False,
+    facts: Dict = None
 ) -> Dict[str, Any]:
     """
     Score both original and optimized bullets, return both scores + deltas.
+    Now passes original bullet and facts to judge for proper factual accuracy assessment.
     """
     if verbose:
         print(f"  Scoring ORIGINAL bullet...")
-    baseline = llm_judge_single_bullet(original, jd, jd_type, has_context, "ORIGINAL BULLET")
+    baseline = llm_judge_single_bullet(original, jd, jd_type, has_context, "ORIGINAL")
 
     if verbose:
         print(f"  Scoring OPTIMIZED bullet...")
-    optimized_scores = llm_judge_single_bullet(optimized, jd, jd_type, has_context, "OPTIMIZED BULLET")
+    # Pass original and facts so judge can check for hallucination
+    optimized_scores = llm_judge_single_bullet(
+        optimized, jd, jd_type, has_context, "OPTIMIZED",
+        original_bullet=original, facts=facts
+    )
 
     # Calculate deltas
     dimensions = ["relevance", "conciseness", "impact", "action_verbs", "factual_accuracy", "keyword_alignment"]
@@ -326,7 +356,8 @@ def run_evaluation(bullets_csv: str = "bullets.csv", jobs_csv: str = "jobs.csv",
 
                     # Compare original vs optimized (gets baseline, optimized scores, and deltas)
                     comparison = compare_bullets(
-                        bullet_text, optimized, jd_text, jd_type, has_context, verbose
+                        bullet_text, optimized, jd_text, jd_type, has_context, verbose,
+                        facts=facts  # Pass facts for proper factual accuracy assessment
                     )
 
                     baseline = comparison['baseline']

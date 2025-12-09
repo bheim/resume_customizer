@@ -955,6 +955,11 @@ def generate_bullet_self_critique(original_bullet: str, job_description: str,
 JOB DESCRIPTION:
 {job_description}
 
+FORMAT: Use Google's XYZ format: "Accomplished [X] as measured by [Y], by doing [Z]"
+- X = What you accomplished
+- Y = Quantifiable metric (only if in source!)
+- Z = How you did it
+
 ⚠️ CONSTRAINT: Use ONLY information from the source above. Add nothing.
 If fit is poor, that's OK - write the best honest bullet you can.
 {char_text}
@@ -975,8 +980,9 @@ BULLET TO REVIEW:
 
 Check:
 1. Does the bullet contain ANY information not in the source? (This is a failure)
-2. Is it relevant to the job?
-3. Is it concise?
+2. Does it follow XYZ format: "Accomplished [X] as measured by [Y], by doing [Z]"?
+3. Is it relevant to the job?
+4. Is it concise?
 
 List specific issues. If it added information not in source, that's the #1 problem."""
 
@@ -992,6 +998,8 @@ CRITIQUE: {critique}
 
 SOURCE (your ONLY allowed information):
 {source}
+
+FORMAT: Use Google's XYZ format: "Accomplished [X] as measured by [Y], by doing [Z]"
 
 ⚠️ If critique says you added information, REMOVE IT. Only use source material.
 A modest honest bullet beats an impressive lie.

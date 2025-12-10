@@ -965,6 +965,12 @@ FORMAT: Use Google's XYZ structure (vary your phrasing, not literal every time):
 - Z = How you did it (methods, tools, approach)
 Good examples: "Reduced costs 20% by automating...", "Led team of 8 to deliver...", "Built pipeline processing 1M records using..."
 
+TOOLS: Only mention tools that are:
+- Technical differentiators (Python, Tableau, Snowflake, etc.)
+- Explicitly mentioned in the JD
+- Essential to understanding the achievement
+OMIT basic tools: Excel, pivot tables, Word, PowerPoint, email, "various tools"
+
 ⚠️ CONSTRAINT: Use ONLY information from the source above. Add nothing.
 If fit is poor, that's OK - write the best honest bullet you can.
 {char_text}

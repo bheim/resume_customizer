@@ -554,14 +554,14 @@ You can ONLY use information from the VERIFIED FACTS above.
 - Every claim must be directly traceable to the facts
 - Do NOT add anything "implied" or "likely" - only explicit facts
 
+FORMAT: Use Google's XYZ structure (vary your phrasing, not literal every time):
+- X = What you accomplished/delivered
+- Y = Measurable result/impact (only if in source!)
+- Z = How you did it (methods, tools, approach)
+Good examples: "Reduced costs 20% by automating...", "Led team of 8 to deliver...", "Built pipeline processing 1M records using..."
+
 ACCEPT LIMITATIONS: If these facts don't align well with the job, that's OK.
 Write the best honest bullet you can. A modest truthful bullet beats an impressive lie.
-
-GUIDELINES:
-1. Lead with a strong action verb
-2. Include the most relevant metric from the facts (if any)
-3. Align terminology with JD where meaning is identical
-4. Be concise - end on the strongest point, don't trail off
 {char_limit_text}
 Return ONLY the bullet. No explanation."""
 
@@ -733,9 +733,13 @@ TARGET JOB DESCRIPTION:
 - Every tool/skill must come from the facts
 - Do NOT add anything implied or assumed
 
-ACCEPT LIMITATIONS: If these facts don't match the job well, write the best honest bullet you can. A modest truthful bullet beats an impressive lie.
+FORMAT: Use Google's XYZ structure (vary your phrasing, not literal every time):
+- X = What you accomplished/delivered
+- Y = Measurable result/impact (only if in source!)
+- Z = How you did it (methods, tools, approach)
+Good examples: "Reduced costs 20% by automating...", "Led team of 8 to deliver...", "Built pipeline processing 1M records using..."
 
-Write one bullet: strong verb, most relevant metric (if any), concise ending.
+ACCEPT LIMITATIONS: If these facts don't match the job well, write the best honest bullet you can. A modest truthful bullet beats an impressive lie.
 {char_limit_text}
 Return ONLY the bullet."""
 
@@ -955,10 +959,11 @@ def generate_bullet_self_critique(original_bullet: str, job_description: str,
 JOB DESCRIPTION:
 {job_description}
 
-FORMAT: Use Google's XYZ format: "Accomplished [X] as measured by [Y], by doing [Z]"
-- X = What you accomplished
-- Y = Quantifiable metric (only if in source!)
-- Z = How you did it
+FORMAT: Use Google's XYZ structure (vary your phrasing, not literal every time):
+- X = What you accomplished/delivered
+- Y = Measurable result/impact (only if in source!)
+- Z = How you did it (methods, tools, approach)
+Good examples: "Reduced costs 20% by automating...", "Led team of 8 to deliver...", "Built pipeline processing 1M records using..."
 
 ⚠️ CONSTRAINT: Use ONLY information from the source above. Add nothing.
 If fit is poor, that's OK - write the best honest bullet you can.
@@ -980,7 +985,7 @@ BULLET TO REVIEW:
 
 Check:
 1. Does the bullet contain ANY information not in the source? (This is a failure)
-2. Does it follow XYZ format: "Accomplished [X] as measured by [Y], by doing [Z]"?
+2. Does it follow XYZ structure (accomplishment + result + method)? Phrasing can vary.
 3. Is it relevant to the job?
 4. Is it concise?
 
@@ -999,7 +1004,10 @@ CRITIQUE: {critique}
 SOURCE (your ONLY allowed information):
 {source}
 
-FORMAT: Use Google's XYZ format: "Accomplished [X] as measured by [Y], by doing [Z]"
+FORMAT: Use Google's XYZ structure (vary your phrasing):
+- X = What you accomplished/delivered
+- Y = Measurable result/impact (only if in source!)
+- Z = How you did it
 
 ⚠️ If critique says you added information, REMOVE IT. Only use source material.
 A modest honest bullet beats an impressive lie.
@@ -1035,11 +1043,16 @@ def generate_bullet_multi_candidate(original_bullet: str, job_description: str,
 JOB DESCRIPTION:
 {job_description}
 
+FORMAT: Use Google's XYZ structure (vary your phrasing across versions):
+- X = What you accomplished/delivered
+- Y = Measurable result/impact (only if in source!)
+- Z = How you did it (methods, tools, approach)
+
 ⚠️ CONSTRAINT: Each version can ONLY use information from the source above.
 - No added metrics, tools, or details
 - If fit is poor, that's OK - write honest variations
 
-Generate 3 different versions (vary structure and emphasis, NOT facts):
+Generate 3 different versions (vary structure, emphasis, and phrasing - NOT facts):
 {char_text}
 VERSION 1: [bullet]
 VERSION 2: [bullet]
@@ -1103,6 +1116,10 @@ You know:
 Candidate's VERIFIED information (this is ALL you can use):
 {source}
 
+FORMAT: Use XYZ structure (vary phrasing naturally):
+- What they accomplished + measurable result (if available) + how they did it
+- Examples: "Reduced costs 20% by automating...", "Led team of 8 to deliver...", "Built pipeline processing 1M records using..."
+
 Rewrite as a bullet I'd trust. Use ONLY the information above - add nothing.
 If their experience doesn't match my job well, that's fine - I prefer an honest modest bullet over an impressive fake one.
 {char_text}
@@ -1155,6 +1172,11 @@ SOURCE (your ONLY allowed information):
 JD PHRASES TO USE (only if they fit naturally):
 {phrases}
 
+FORMAT: Use Google's XYZ structure (vary your phrasing):
+- X = What you accomplished/delivered
+- Y = Measurable result/impact (only if in source!)
+- Z = How you did it (methods, tools, approach)
+
 ⚠️ CONSTRAINT:
 - You can swap synonyms (e.g., "built" → "developed" if JD uses "developed")
 - You CANNOT add new information, metrics, or claims
@@ -1198,11 +1220,16 @@ def generate_bullet_combined(original_bullet: str, job_description: str,
 JOB DESCRIPTION:
 {job_description}
 
+FORMAT: Use Google's XYZ structure (vary your phrasing across versions):
+- X = What you accomplished/delivered
+- Y = Measurable result/impact (only if in source!)
+- Z = How you did it (methods, tools, approach)
+
 ⚠️ CONSTRAINT: Each version can ONLY use information from the source above.
 - No added metrics, tools, or details
 - If fit is poor, that's OK - write honest variations
 
-Generate 3 different versions (vary structure and emphasis, NOT facts):
+Generate 3 different versions (vary structure, emphasis, and phrasing - NOT facts):
 {char_text}
 VERSION 1: [bullet]
 VERSION 2: [bullet]
@@ -1318,13 +1345,19 @@ JOB DESCRIPTION:
 BULLETS TO OPTIMIZE:
 {bullets_section}
 
+FORMAT: Use Google's XYZ structure (vary phrasing across bullets):
+- X = What you accomplished/delivered
+- Y = Measurable result/impact (only if in source!)
+- Z = How you did it (methods, tools, approach)
+Good examples: "Reduced costs 20% by automating...", "Led team of 8 to deliver...", "Built pipeline processing 1M records using..."
+
 ⚠️ CRITICAL CONSTRAINTS:
 - For each bullet, use ONLY the facts provided (or original if no facts)
 - Do NOT add metrics, tools, or details not in the source
 - If a bullet doesn't fit the job well, write the best honest version
 
 BATCH OPTIMIZATION GOALS:
-1. Vary sentence structures across bullets (don't start all with same pattern)
+1. Vary sentence structures and XYZ phrasing across bullets (don't start all with same pattern)
 2. Distribute JD keywords strategically (don't repeat same keywords in every bullet)
 3. Lead with strongest/most relevant bullets' content
 4. Ensure each bullet stands alone but together tells a cohesive story

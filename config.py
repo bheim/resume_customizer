@@ -1,4 +1,5 @@
 import os, sys, logging
+from anthropic import Anthropic
 from openai import OpenAI
 from supabase import create_client, Client
 
@@ -13,11 +14,15 @@ logging.basicConfig(
 log = logging.getLogger("resume")
 log.propagate = True
 
-# --- OpenAI ---
+# --- Anthropic (for chat completions) ---
+ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY")
+client = Anthropic(api_key=ANTHROPIC_KEY) if ANTHROPIC_KEY else None
+CHAT_MODEL = os.getenv("CHAT_MODEL", "claude-sonnet-4-5-20250929")
+
+# --- OpenAI (for embeddings only) ---
 OPENAI_KEY = os.environ.get("OPENAI_API_KEY")
-client = OpenAI(api_key=OPENAI_KEY) if OPENAI_KEY else None
+openai_client = OpenAI(api_key=OPENAI_KEY) if OPENAI_KEY else None
 EMBED_MODEL = os.getenv("EMBED_MODEL", "text-embedding-3-small")
-CHAT_MODEL = os.getenv("CHAT_MODEL", "gpt-4o-mini")
 
 # --- Supabase ---
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
@@ -52,7 +57,8 @@ BULLET_CHARS = {"•","·","-","–","—","◦","●","*"}
 def health():
     return {
         "status": "ok",
-        "openai": bool(OPENAI_KEY),
+        "anthropic": bool(ANTHROPIC_KEY),
+        "openai_embeddings": bool(OPENAI_KEY),
         "supabase": bool(supabase),
         "models": {"embed": EMBED_MODEL, "chat": CHAT_MODEL},
         "weights": {"emb": W_EMB, "keywords": W_KEY, "llm": W_LLM, "semantic_distilled_weight": W_DISTILLED},

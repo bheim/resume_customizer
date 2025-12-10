@@ -1,7 +1,7 @@
-import re, hashlib
+import re, hashlib, json
 from json import loads
 from typing import List, Dict, Optional, Tuple
-from config import client, CHAT_MODEL, EMBED_MODEL, USE_DISTILLED_JD, USE_LLM_TERMS, log
+from config import client, openai_client, CHAT_MODEL, EMBED_MODEL, USE_DISTILLED_JD, USE_LLM_TERMS, log
 from text_utils import top_terms
 
 _distill_cache: Dict[str, str] = {}
@@ -21,8 +21,8 @@ Return plain text only.
 JOB DESCRIPTION:
 {jd_text}
 """
-    r = client.chat.completions.create(model=CHAT_MODEL, messages=[{"role":"user","content":prompt}], temperature=0)
-    distilled = (r.choices[0].message.content or "").strip()
+    r = client.messages.create(model=CHAT_MODEL, max_tokens=1024, messages=[{"role":"user","content":prompt}], temperature=0)
+    distilled = (r.content[0].text or "").strip()
     if not distilled or len(distilled) < 40: distilled = jd_text
     _distill_cache[h] = distilled
     log.info(f"The distilled job description is {distilled}")
@@ -48,8 +48,8 @@ Output JSON ONLY with those keys and arrays.
 JOB DESCRIPTION:
 {jd_text}
 """
-    r = client.chat.completions.create(model=CHAT_MODEL, messages=[{"role":"user","content":prompt}], temperature=0)
-    raw = (r.choices[0].message.content or "").strip()
+    r = client.messages.create(model=CHAT_MODEL, max_tokens=1024, messages=[{"role":"user","content":prompt}], temperature=0)
+    raw = (r.content[0].text or "").strip()
     try:
         data = loads(raw)
     except Exception:
@@ -67,8 +67,8 @@ JOB DESCRIPTION:
     return out
 
 def embed(text: str) -> List[float]:
-    if not client: return []
-    resp = client.embeddings.create(model=EMBED_MODEL, input=text)
+    if not openai_client: return []
+    resp = openai_client.embeddings.create(model=EMBED_MODEL, input=text)
     return resp.data[0].embedding
 
 def llm_fit_score(resume_text: str, jd_text: str) -> float:
@@ -83,8 +83,8 @@ JOB DESCRIPTION:
 RESUME:
 {resume_text}
 """
-    r = client.chat.completions.create(model=CHAT_MODEL, messages=[{"role":"user","content":prompt}], temperature=0)
-    out = (r.choices[0].message.content or "").strip()
+    r = client.messages.create(model=CHAT_MODEL, max_tokens=64, messages=[{"role":"user","content":prompt}], temperature=0)
+    out = (r.content[0].text or "").strip()
     m = re.search(r"(\d{1,3})", out)
     if not m: return 0.0
     val = max(0, min(100, int(m.group(1))))
@@ -216,13 +216,14 @@ Return ONLY valid JSON in this exact format (no commentary, no code fences):
 Evaluate objectively and independently. Each dimension should be scored 1-10."""
 
     try:
-        r = client.chat.completions.create(
+        r = client.messages.create(
             model=CHAT_MODEL,
+            max_tokens=1024,
             messages=[{"role": "user", "content": prompt}],
             temperature=0  # Deterministic for consistent grading
         )
 
-        raw = (r.choices[0].message.content or "").strip()
+        raw = (r.content[0].text or "").strip()
 
         # Clean potential code fences
         if raw.startswith("```"):
@@ -310,7 +311,7 @@ def should_ask_more_questions(answered_qa: List[Dict[str, str]], bullets: List[s
         Tuple of (should_ask_more, reason)
     """
     if not client:
-        return False, "OpenAI client not available"
+        return False, "Anthropic client not available"
 
     if len(answered_qa) == 0:
         return True, "No questions answered yet"
@@ -339,13 +340,14 @@ Be biased towards YES - only say NO if there are critical missing pieces of info
 Answer with ONLY "YES" or "NO" followed by a brief reason (one sentence).
 Format: YES|reason or NO|reason"""
 
-    r = client.chat.completions.create(
+    r = client.messages.create(
         model=CHAT_MODEL,
+        max_tokens=256,
         messages=[{"role": "user", "content": prompt}],
         temperature=0
     )
 
-    response = (r.choices[0].message.content or "").strip()
+    response = (r.content[0].text or "").strip()
 
     # Parse response
     if response.startswith("YES"):
@@ -380,62 +382,48 @@ def _generate_bullet_without_facts(original_bullet: str, job_description: str,
         if char_limit else ""
     )
 
-    prompt = f"""You are a professional resume writer. Optimize this bullet for the target job description while preserving ALL factual content.
+    prompt = f"""You are a resume writer who NEVER invents information.
 
-⚠️  CRITICAL ANTI-HALLUCINATION RULES - STRICTLY ENFORCED:
-
-1. PRESERVE EVERYTHING: Keep every metric, number, percentage, timeframe, technology, tool, and detail EXACTLY as stated in the original
-2. ZERO ADDITIONS: Do NOT add any metrics, technologies, team sizes, timeframes, or accomplishments not explicitly in the original
-3. ZERO INVENTIONS: Do NOT make up numbers, percentages, outcomes, or specifics of any kind
-4. FACT-CHECK YOURSELF: Every claim in your output must have a direct source in the original bullet
-
-✅ WHAT YOU CAN DO (Surface-level optimization only):
-• Strengthen action verbs to match job description tone
-  Examples: "worked on" → "developed", "helped with" → "contributed to", "did" → "executed"
-
-• Restructure using impact-first formats (use variety, NOT the same structure for every bullet):
-  - "[Action] [X] resulting in [Y]"
-  - "[Action] [X] by doing [Z]"
-  - "[Action] [X], achieving [Y]"
-  - "[Action] [X] to drive [Y]"
-  - "[Action] [X] through [Z]"
-
-• Align terminology with job description keywords (keep meaning identical)
-  If JD says "engineered" instead of "built", swap them. If JD says "optimized" instead of "improved", swap them.
-
-• Improve readability and flow - make it punchy and clear
-• Reorder information to lead with impact
-
-❌ WHAT YOU ABSOLUTELY CANNOT DO:
-• Add metrics not in original (team size, percentages, numbers, timeframes)
-• Add technologies or tools not mentioned
-• Add scope details or project specifics
-• Invent accomplishments or outcomes
-• Embellish or exaggerate existing facts
-• Add implied information - only use what's explicitly stated
-
-ORIGINAL BULLET (this is your ONLY source of truth):
+ORIGINAL BULLET:
 {original_bullet}
 
-TARGET JOB DESCRIPTION (for keyword alignment only):
-{job_description}{char_limit_text}
+TARGET JOB DESCRIPTION:
+{job_description}
 
-VALIDATION CHECKLIST (mentally verify before responding):
-□ Every number in output appears in original?
-□ Every technology in output appears in original?
-□ Every metric in output appears in original?
-□ Every claim can be traced to original?
+YOUR TASK: Reword this bullet to better align with the job description.
 
-Return ONLY the optimized bullet text. No explanations, no commentary."""
+⚠️ CRITICAL CONSTRAINT - READ THIS FIRST:
+You can ONLY use information that appears in the original bullet above.
+- If the original has no metrics, your output has no metrics
+- If the original has no specific tools, your output has no specific tools
+- If the original doesn't match the job well, that's OK - do your best without lying
+
+WHAT YOU CAN CHANGE:
+✓ Strengthen weak verbs ("helped with" → "supported", "worked on" → "contributed to")
+✓ Reorder for impact (lead with the most relevant part)
+✓ Swap synonyms to match JD terminology (if meaning is identical)
+✓ Tighten wordiness
+
+WHAT YOU CANNOT DO:
+✗ Add numbers, metrics, or percentages not in original
+✗ Add tools, technologies, or methodologies not in original
+✗ Add team sizes, timelines, or scope not in original
+✗ Infer or imply details beyond what's explicitly stated
+✗ Make vague claims specific (if original says "improved", don't add "by 30%")
+
+ACCEPT LIMITATIONS: If the bullet doesn't align well with this job, produce the best honest version. A modest truthful bullet beats an impressive lie.
+{char_limit_text}
+Return ONLY the reworded bullet. No explanation."""
 
     try:
-        log.debug(f"  Calling OpenAI with temperature=0.3")
-        response = client.chat.completions.create(
+        log.debug(f"  Calling Anthropic with temperature=0.2")
+        response = client.messages.create(
             model=CHAT_MODEL,
+            max_tokens=1024,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.3  # Slightly higher for variety, still controlled
+            temperature=0.2  # Low temperature to reduce creativity/hallucination
         )
-        enhanced = response.choices[0].message.content.strip()
+        enhanced = response.content[0].text.strip()
 
         log.info(f"  LLM returned: '{enhanced[:100]}...'")
         log.debug(f"  Full LLM response: '{enhanced}'")
@@ -484,7 +472,7 @@ def generate_bullet_with_facts(original_bullet: str, job_description: str,
         Enhanced bullet string
     """
     if not client:
-        raise RuntimeError("OPENAI_API_KEY missing")
+        raise RuntimeError("ANTHROPIC_API_KEY missing")
 
     # Detect if we have meaningful facts
     has_meaningful_facts = bool(
@@ -551,82 +539,46 @@ def generate_bullet_with_facts(original_bullet: str, job_description: str,
     log.info(f"  → Taking WITH-FACTS path (rich optimization)")
     log.debug(f"  Facts text length: {len(facts_text)} chars")
 
-    prompt = f"""You are a professional resume writer creating a new, optimized bullet point.
+    prompt = f"""You are a resume writer who NEVER invents information.
 
-            Your task: Construct a compelling bullet from scratch using the verified facts below, optimized for the target job description. The original bullet is provided only as context for what experience this covers—do not simply edit it.
+TARGET JOB DESCRIPTION:
+{job_description}
 
-            TARGET JOB DESCRIPTION:
-            {job_description}
+VERIFIED FACTS (your ONLY source material):
+{facts_text}
 
-            VERIFIED FACTS TO USE:
-            {facts_text}
+⚠️ CRITICAL CONSTRAINT - READ THIS FIRST:
+You can ONLY use information from the VERIFIED FACTS above.
+- Every metric in your output must appear in the facts
+- Every tool/technology must appear in the facts
+- Every claim must be directly traceable to the facts
+- Do NOT add anything "implied" or "likely" - only explicit facts
 
-REWRITING GUIDELINES:
+FORMAT: Use Google's XYZ structure (vary your phrasing, not literal every time):
+- X = What you accomplished/delivered
+- Y = Measurable result/impact (only if in source!)
+- Z = How you did it (methods, tools, approach)
+Good examples: "Reduced costs 20% by automating...", "Led team of 8 to deliver...", "Built pipeline processing 1M records using..."
 
-1. ACTION VERBS - Preserve or strengthen ownership language:
-   • If the original verb shows creation/leadership (Developed, Led, Built, Architected, Designed), keep it or use an equally strong verb
-   • Don't weaken "Developed" → "Streamlined" or "Led" → "Supported"
-   • Strong verbs: Led, Developed, Engineered, Optimized, Architected, Drove, Delivered, Built, Designed, Implemented, Spearheaded, Created
-   • Choose verbs that match the job description's language while maintaining ownership
-
-2. FACT SELECTION - Quality over quantity:
-   • Select the 1-2 most impressive, relevant facts
-   • Don't try to incorporate every detail - one powerful metric beats three mediocre ones
-   • If a fact doesn't fit naturally in a concise bullet, drop it
-
-3. METRIC CLARITY - State each metric once in its most compelling form:
-   • Don't restate the same achievement multiple ways
-   • Choose the most impactful representation
-
-4. CONCISENESS - Every word must earn its place:
-   • Cut ruthlessly - aim for maximum impact in minimum words
-   • Remove descriptive filler: "comprehensive", "utilizing", "leveraging", "extensive"
-   • Don't explain the obvious: if you analyzed data, skip "through data-driven insights"
-   • Each detail must pass the "so what?" test - does it make the achievement more impressive, or just longer?
-   • Technical details (tools/methods) should only be included if:
-     - Specifically mentioned in the job description, OR
-     - Highly specialized/impressive for the role
-     - Generic phrases like "statistical methods" add no value - cut them
-
-   END ON THE STRONGEST POINT:
-   • Bullets should end with the most impactful element - usually the quantified result
-   • After stating the concrete outcome, STOP
-   • Don't add trailing "through X" or "via Y" or "derived from Z" clauses
-   • These explanatory tails weaken the ending and add no concrete value
-
-   Example:
-   ❌ "Reduced costs by 40% through rigorous process optimization and strategic vendor negotiations"
-   ✅ "Reduced costs by 40% through vendor renegotiation"
-
-   The result (40% reduction) is the punch line - end there or immediately after the key method.
-
-5. STRUCTURE VARIETY - Use different formats across bullets:
-   • "[Action] [X] resulting in [Y]"
-   • "[Action] [X], achieving [Y]"
-   • "[Action] [X] by doing [Z]"
-   • "[Action] [X] to [concrete outcome]"
-   • "[Action] [X] through [Z], delivering [Y]"
-   • Vary structure - don't make all bullets sound the same
-
-6. ALIGNMENT - Match job description requirements and terminology
-
-7. DO NOT add information not present in the facts above{char_limit_text}
-
-            Return ONLY the new bullet."""
+ACCEPT LIMITATIONS: If these facts don't align well with the job, that's OK.
+Write the best honest bullet you can. A modest truthful bullet beats an impressive lie.
+{char_limit_text}
+Return ONLY the bullet. No explanation."""
 
     # Log the full prompt so it's visible in logs
     log.info(f"  ===== WITH-FACTS PROMPT START =====")
     log.info(prompt)
     log.info(f"  ===== WITH-FACTS PROMPT END =====")
 
-    log.debug(f"  Calling OpenAI with temperature=0.4 for variety")
-    r = client.chat.completions.create(
+    log.debug(f"  Calling Anthropic with temperature=0.2")
+    r = client.messages.create(
         model=CHAT_MODEL,
+        max_tokens=1024,
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.4  # Higher for structural variety while staying factual
+        temperature=0.2  # Low to reduce hallucination
     )
 
-    enhanced_bullet = (r.choices[0].message.content or "").strip()
+    enhanced_bullet = (r.content[0].text or "").strip()
 
     # Clean up any bullet markers or extra formatting
     enhanced_bullet = enhanced_bullet.lstrip("-• ").strip()
@@ -657,7 +609,7 @@ def generate_bullet_with_facts_scaffolded(original_bullet: str, job_description:
         Enhanced bullet string
     """
     if not client:
-        raise RuntimeError("OPENAI_API_KEY missing")
+        raise RuntimeError("ANTHROPIC_API_KEY missing")
 
     # Detect if we have meaningful facts
     has_meaningful_facts = bool(
@@ -732,15 +684,16 @@ Return ONLY valid JSON (no commentary):
   "reasoning": "Brief explanation of why these facts matter most for THIS job"
 }}"""
 
-    log.debug(f"  Selection prompt created, calling OpenAI")
+    log.debug(f"  Selection prompt created, calling Anthropic")
 
-    r1 = client.chat.completions.create(
+    r1 = client.messages.create(
         model=CHAT_MODEL,
+        max_tokens=1024,
         messages=[{"role": "user", "content": selection_prompt}],
         temperature=0  # Deterministic selection
     )
 
-    selection_raw = (r1.choices[0].message.content or "").strip()
+    selection_raw = (r1.content[0].text or "").strip()
 
     # Clean code fences if present
     if selection_raw.startswith("```"):
@@ -767,48 +720,39 @@ Return ONLY valid JSON (no commentary):
     selected_facts_text = "\n".join([f"• {fact}" for fact in selected_facts])
     char_limit_text = f"\nIMPORTANT: Keep the bullet under {char_limit} characters." if char_limit else ""
 
-    crafting_prompt = f"""You are a professional resume writer creating an optimized bullet point.
+    crafting_prompt = f"""You are a resume writer who NEVER invents information.
+
+SELECTED FACTS (your ONLY source - use nothing else):
+{selected_facts_text}
 
 TARGET JOB DESCRIPTION:
 {job_description}
 
-SELECTED FACTS TO USE (use ONLY these):
-{selected_facts_text}
+⚠️ CRITICAL: You can ONLY use information from the SELECTED FACTS above.
+- Every metric must come from the facts
+- Every tool/skill must come from the facts
+- Do NOT add anything implied or assumed
 
-WHY THESE FACTS: {reasoning}
+FORMAT: Use Google's XYZ structure (vary your phrasing, not literal every time):
+- X = What you accomplished/delivered
+- Y = Measurable result/impact (only if in source!)
+- Z = How you did it (methods, tools, approach)
+Good examples: "Reduced costs 20% by automating...", "Led team of 8 to deliver...", "Built pipeline processing 1M records using..."
 
-WRITING GUIDELINES:
+ACCEPT LIMITATIONS: If these facts don't match the job well, write the best honest bullet you can. A modest truthful bullet beats an impressive lie.
+{char_limit_text}
+Return ONLY the bullet."""
 
-1. ACTION VERBS - Use strong ownership language:
-   • Strong verbs: Led, Developed, Engineered, Optimized, Architected, Drove, Delivered, Built, Designed, Implemented
-   • Match the job description's language level
+    log.debug(f"  Crafting prompt created, calling Anthropic")
 
-2. STRUCTURE - Craft one powerful statement:
-   • Lead with action verb
-   • State the achievement/outcome clearly
-   • Include the most impressive metric/result
-   • END IMMEDIATELY after the strongest point - don't trail off
-
-3. CONCISENESS - Every word must earn its place:
-   • Cut filler: "comprehensive", "utilizing", "leveraging"
-   • Don't explain the obvious
-   • After stating the result, STOP - no trailing "through X" clauses
-
-4. JD ALIGNMENT - Use terminology from the job description
-
-5. FACTS ONLY - Do NOT add information beyond the selected facts above{char_limit_text}
-
-Return ONLY the new bullet."""
-
-    log.debug(f"  Crafting prompt created, calling OpenAI")
-
-    r2 = client.chat.completions.create(
+    r2 = client.messages.create(
         model=CHAT_MODEL,
+        max_tokens=1024,
         messages=[{"role": "user", "content": crafting_prompt}],
-        temperature=0.4  # Allow some variety in phrasing
+        temperature=0.2  # Low to reduce hallucination
     )
 
-    enhanced_bullet = (r2.choices[0].message.content or "").strip()
+    enhanced_bullet = (r2.content[0].text or "").strip()
     enhanced_bullet = enhanced_bullet.lstrip("-• ").strip()
 
     log.info(f"  → Scaffolded result: '{enhanced_bullet[:80]}...'")
@@ -830,7 +774,7 @@ def generate_conversational_question(bullet_text: str) -> str:
         A conversational opening question/prompt
     """
     if not client:
-        raise RuntimeError("OPENAI_API_KEY missing")
+        raise RuntimeError("ANTHROPIC_API_KEY missing")
 
     system_prompt = """You are a professional resume coach conducting a friendly interview to understand someone's work experience.
 
@@ -853,16 +797,17 @@ When you have enough detail for a strong bullet (actions + results + context), s
 
 Tell me the story - what did this role actually involve? What were you doing day-to-day, and what results did you achieve?"""
 
-    r = client.chat.completions.create(
+    r = client.messages.create(
         model=CHAT_MODEL,
+        max_tokens=1024,
+        system=system_prompt,
         messages=[
-            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ],
         temperature=0.7
     )
 
-    question = (r.choices[0].message.content or "").strip()
+    question = (r.content[0].text or "").strip()
     log.info(f"Generated conversational question for: {bullet_text[:50]}...")
     return question
 
@@ -881,7 +826,7 @@ def extract_facts_from_conversation(bullet_text: str, conversation_history: str)
         Structured facts dictionary with: situation, actions, results, skills, tools, timeline
     """
     if not client:
-        raise RuntimeError("OPENAI_API_KEY missing")
+        raise RuntimeError("ANTHROPIC_API_KEY missing")
 
     system_prompt = """You are a professional resume expert. Your job is to extract structured facts from a conversation about a work experience.
 
@@ -911,16 +856,17 @@ Conversation:
 
 Extract structured facts from this conversation."""
 
-    r = client.chat.completions.create(
+    r = client.messages.create(
         model=CHAT_MODEL,
+        max_tokens=1024,
+        system=system_prompt,
         messages=[
-            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ],
         temperature=0
     )
 
-    raw = (r.choices[0].message.content or "").strip()
+    raw = (r.content[0].text or "").strip()
 
     try:
         # Clean potential code fences
@@ -959,4 +905,536 @@ Extract structured facts from this conversation."""
             "timeline": ""
         }
 
+
+# =============================================================================
+# EXPERIMENTAL APPROACHES FOR A/B TESTING
+# =============================================================================
+
+def _format_facts(stored_facts: Dict) -> str:
+    """Helper to format facts dictionary into readable text."""
+    facts_text = ""
+    if stored_facts.get("situation"):
+        facts_text += f"Context: {stored_facts['situation']}\n"
+    if stored_facts.get("actions"):
+        actions = stored_facts["actions"]
+        if isinstance(actions, list) and actions:
+            facts_text += "Actions: " + "; ".join(actions) + "\n"
+    if stored_facts.get("results"):
+        results = stored_facts["results"]
+        if isinstance(results, list) and results:
+            facts_text += "Results: " + "; ".join(results) + "\n"
+    if stored_facts.get("skills"):
+        skills = stored_facts["skills"]
+        if isinstance(skills, list) and skills:
+            facts_text += f"Skills: {', '.join(skills)}\n"
+    if stored_facts.get("tools"):
+        tools = stored_facts["tools"]
+        if isinstance(tools, list) and tools:
+            facts_text += f"Tools: {', '.join(tools)}\n"
+    if stored_facts.get("timeline"):
+        facts_text += f"Timeline: {stored_facts['timeline']}\n"
+    return facts_text.strip()
+
+
+def generate_bullet_self_critique(original_bullet: str, job_description: str,
+                                   stored_facts: Dict, char_limit: Optional[int] = None) -> str:
+    """
+    Self-Critique Loop: Generate -> Critique -> Revise
+    """
+    if not client:
+        raise RuntimeError("ANTHROPIC_API_KEY missing")
+
+    has_facts = bool(stored_facts and any(stored_facts.get(c) for c in ["tools", "skills", "actions", "results", "situation", "timeline"]))
+    facts_text = _format_facts(stored_facts) if has_facts else ""
+    char_text = f"\nKeep under {char_limit} characters." if char_limit else ""
+    source = f"VERIFIED FACTS:\n{facts_text}" if has_facts else f"ORIGINAL BULLET:\n{original_bullet}"
+
+    log.info(f"generate_bullet_self_critique - '{original_bullet[:50]}...'")
+
+    # STAGE 1: Generate
+    gen_prompt = f"""You are a resume writer who NEVER invents information.
+
+{source}
+
+JOB DESCRIPTION:
+{job_description}
+
+FORMAT: Use Google's XYZ structure (vary your phrasing, not literal every time):
+- X = What you accomplished/delivered
+- Y = Measurable result/impact (only if in source!)
+- Z = How you did it (methods, tools, approach)
+Good examples: "Reduced costs 20% by automating...", "Led team of 8 to deliver...", "Built pipeline processing 1M records using..."
+
+TOOLS: Only mention tools that are:
+- Technical differentiators (Python, Tableau, Snowflake, etc.)
+- Explicitly mentioned in the JD
+- Essential to understanding the achievement
+OMIT basic tools: Excel, pivot tables, Word, PowerPoint, email, "various tools"
+
+⚠️ CONSTRAINT: Use ONLY information from the source above. Add nothing.
+If fit is poor, that's OK - write the best honest bullet you can.
+{char_text}
+Return ONLY the bullet."""
+
+    r1 = client.messages.create(model=CHAT_MODEL, max_tokens=512, messages=[{"role": "user", "content": gen_prompt}], temperature=0.2)
+    draft = (r1.content[0].text or "").strip().lstrip("-• ")
+    log.info(f"  Draft: '{draft[:60]}...'")
+
+    # STAGE 2: Critique (focus on HONESTY not impressiveness)
+    critique_prompt = f"""Review this bullet for FACTUAL ACCURACY first, then quality.
+
+SOURCE MATERIAL:
+{source}
+
+BULLET TO REVIEW:
+{draft}
+
+Check:
+1. Does the bullet contain ANY information not in the source? (This is a failure)
+2. Does it follow XYZ structure (accomplishment + result + method)? Phrasing can vary.
+3. Is it relevant to the job?
+4. Is it concise?
+
+List specific issues. If it added information not in source, that's the #1 problem."""
+
+    r2 = client.messages.create(model=CHAT_MODEL, max_tokens=512, messages=[{"role": "user", "content": critique_prompt}], temperature=0.1)
+    critique = (r2.content[0].text or "").strip()
+    log.info(f"  Critique: '{critique[:60]}...'")
+
+    # STAGE 3: Revise
+    revise_prompt = f"""Revise this bullet based on the critique.
+
+BULLET: {draft}
+CRITIQUE: {critique}
+
+SOURCE (your ONLY allowed information):
+{source}
+
+FORMAT: Use Google's XYZ structure (vary your phrasing):
+- X = What you accomplished/delivered
+- Y = Measurable result/impact (only if in source!)
+- Z = How you did it
+
+⚠️ If critique says you added information, REMOVE IT. Only use source material.
+A modest honest bullet beats an impressive lie.
+{char_text}
+Return ONLY the revised bullet."""
+
+    r3 = client.messages.create(model=CHAT_MODEL, max_tokens=512, messages=[{"role": "user", "content": revise_prompt}], temperature=0.2)
+    final = (r3.content[0].text or "").strip().lstrip("-• ")
+    log.info(f"  Final: '{final[:60]}...'")
+    return final
+
+
+def generate_bullet_multi_candidate(original_bullet: str, job_description: str,
+                                     stored_facts: Dict, char_limit: Optional[int] = None) -> str:
+    """
+    Multi-Candidate: Generate 3 variants -> Select best
+    """
+    if not client:
+        raise RuntimeError("ANTHROPIC_API_KEY missing")
+
+    has_facts = bool(stored_facts and any(stored_facts.get(c) for c in ["tools", "skills", "actions", "results", "situation", "timeline"]))
+    facts_text = _format_facts(stored_facts) if has_facts else ""
+    char_text = f"\nEach under {char_limit} chars." if char_limit else ""
+    source = f"VERIFIED FACTS:\n{facts_text}" if has_facts else f"ORIGINAL BULLET:\n{original_bullet}"
+
+    log.info(f"generate_bullet_multi_candidate - '{original_bullet[:50]}...'")
+
+    # STAGE 1: Generate 3 candidates
+    gen_prompt = f"""You are a resume writer who NEVER invents information.
+
+{source}
+
+JOB DESCRIPTION:
+{job_description}
+
+FORMAT: Use Google's XYZ structure (vary your phrasing across versions):
+- X = What you accomplished/delivered
+- Y = Measurable result/impact (only if in source!)
+- Z = How you did it (methods, tools, approach)
+
+⚠️ CONSTRAINT: Each version can ONLY use information from the source above.
+- No added metrics, tools, or details
+- If fit is poor, that's OK - write honest variations
+
+Generate 3 different versions (vary structure, emphasis, and phrasing - NOT facts):
+{char_text}
+VERSION 1: [bullet]
+VERSION 2: [bullet]
+VERSION 3: [bullet]"""
+
+    r1 = client.messages.create(model=CHAT_MODEL, max_tokens=1024, messages=[{"role": "user", "content": gen_prompt}], temperature=0.3)
+    candidates = (r1.content[0].text or "").strip()
+    log.info(f"  Generated 3 candidates")
+
+    # STAGE 2: Select best (prioritize honesty)
+    select_prompt = f"""Pick the BEST bullet from these candidates.
+
+SOURCE MATERIAL (what the bullet should be based on):
+{source}
+
+CANDIDATES:
+{candidates}
+
+Evaluate:
+1. FACTUAL ACCURACY - Does it only contain info from the source? (Most important)
+2. Relevance to job
+3. Conciseness
+
+Return ONLY the winning bullet text (no "VERSION X:")."""
+
+    r2 = client.messages.create(model=CHAT_MODEL, max_tokens=256, messages=[{"role": "user", "content": select_prompt}], temperature=0)
+    selected = (r2.content[0].text or "").strip().lstrip("-• ")
+    for prefix in ["VERSION 1:", "VERSION 2:", "VERSION 3:", "Winner:", "Best:"]:
+        if selected.upper().startswith(prefix.upper()):
+            selected = selected[len(prefix):].strip()
+    log.info(f"  Selected: '{selected[:60]}...'")
+    return selected
+
+
+def generate_bullet_hiring_manager(original_bullet: str, job_description: str,
+                                    stored_facts: Dict, char_limit: Optional[int] = None) -> str:
+    """
+    Hiring Manager Perspective: Write as the evaluator
+    """
+    if not client:
+        raise RuntimeError("ANTHROPIC_API_KEY missing")
+
+    has_facts = bool(stored_facts and any(stored_facts.get(c) for c in ["tools", "skills", "actions", "results", "situation", "timeline"]))
+    facts_text = _format_facts(stored_facts) if has_facts else ""
+    char_text = f"\nKeep under {char_limit} characters." if char_limit else ""
+    source = f"VERIFIED FACTS:\n{facts_text}" if has_facts else f"ORIGINAL BULLET:\n{original_bullet}"
+
+    log.info(f"generate_bullet_hiring_manager - '{original_bullet[:50]}...'")
+
+    system = """You're an experienced hiring manager who VALUES HONESTY over impressiveness.
+
+You know:
+- A candidate who embellishes is a red flag
+- Modest but verifiable beats impressive but vague
+- You'd rather see "Analyzed data" than "Leveraged advanced analytics to drive strategic insights"
+- Specifics from the actual work matter more than buzzwords"""
+
+    user = f"""I'm hiring for:
+{job_description}
+
+Candidate's VERIFIED information (this is ALL you can use):
+{source}
+
+FORMAT: Use XYZ structure (vary phrasing naturally):
+- What they accomplished + measurable result (if available) + how they did it
+- Examples: "Reduced costs 20% by automating...", "Led team of 8 to deliver...", "Built pipeline processing 1M records using..."
+
+Rewrite as a bullet I'd trust. Use ONLY the information above - add nothing.
+If their experience doesn't match my job well, that's fine - I prefer an honest modest bullet over an impressive fake one.
+{char_text}
+Return ONLY the bullet."""
+
+    r = client.messages.create(model=CHAT_MODEL, max_tokens=512, system=system, messages=[{"role": "user", "content": user}], temperature=0.2)
+    result = (r.content[0].text or "").strip().lstrip("-• ")
+    log.info(f"  Result: '{result[:60]}...'")
+    return result
+
+
+def generate_bullet_jd_mirror(original_bullet: str, job_description: str,
+                               stored_facts: Dict, char_limit: Optional[int] = None) -> str:
+    """
+    JD-Mirroring: Extract JD phrases -> Incorporate them (without adding facts)
+    """
+    if not client:
+        raise RuntimeError("ANTHROPIC_API_KEY missing")
+
+    has_facts = bool(stored_facts and any(stored_facts.get(c) for c in ["tools", "skills", "actions", "results", "situation", "timeline"]))
+    facts_text = _format_facts(stored_facts) if has_facts else ""
+    char_text = f"\nKeep under {char_limit} characters." if char_limit else ""
+    source = f"VERIFIED FACTS:\n{facts_text}" if has_facts else f"ORIGINAL BULLET:\n{original_bullet}"
+
+    log.info(f"generate_bullet_jd_mirror - '{original_bullet[:50]}...'")
+
+    # STAGE 1: Extract JD phrases that MATCH existing experience
+    extract_prompt = f"""Find JD terminology that matches the candidate's ACTUAL experience.
+
+JOB DESCRIPTION:
+{job_description}
+
+CANDIDATE'S VERIFIED EXPERIENCE:
+{source}
+
+List 2-4 JD phrases where the candidate has DEMONSTRATED that skill/action.
+Only include phrases where there's a real match - don't stretch.
+If few phrases match, that's OK - list only genuine matches."""
+
+    r1 = client.messages.create(model=CHAT_MODEL, max_tokens=256, messages=[{"role": "user", "content": extract_prompt}], temperature=0)
+    phrases = (r1.content[0].text or "").strip()
+    log.info(f"  JD phrases: '{phrases[:60]}...'")
+
+    # STAGE 2: Rewrite using ONLY source facts, with JD terminology where it fits
+    rewrite = f"""Rewrite using JD terminology where it naturally fits.
+
+SOURCE (your ONLY allowed information):
+{source}
+
+JD PHRASES TO USE (only if they fit naturally):
+{phrases}
+
+FORMAT: Use Google's XYZ structure (vary your phrasing):
+- X = What you accomplished/delivered
+- Y = Measurable result/impact (only if in source!)
+- Z = How you did it (methods, tools, approach)
+
+⚠️ CONSTRAINT:
+- You can swap synonyms (e.g., "built" → "developed" if JD uses "developed")
+- You CANNOT add new information, metrics, or claims
+- If a JD phrase doesn't fit the actual experience, don't force it
+
+A modest honest bullet with some JD keywords beats an impressive lie.
+{char_text}
+Return ONLY the bullet."""
+
+    r2 = client.messages.create(model=CHAT_MODEL, max_tokens=512, messages=[{"role": "user", "content": rewrite}], temperature=0.2)
+    result = (r2.content[0].text or "").strip().lstrip("-• ")
+    log.info(f"  Result: '{result[:60]}...'")
+    return result
+
+
+def generate_bullet_combined(original_bullet: str, job_description: str,
+                              stored_facts: Dict, char_limit: Optional[int] = None) -> str:
+    """
+    Combined Multi-Candidate + Self-Critique:
+    1. Generate 3 candidate bullets
+    2. Critique each for factual accuracy
+    3. Select the best one that passes factual check
+
+    This combines the creativity of multi-candidate with the factual rigor of self-critique.
+    """
+    if not client:
+        raise RuntimeError("ANTHROPIC_API_KEY missing")
+
+    has_facts = bool(stored_facts and any(stored_facts.get(c) for c in ["tools", "skills", "actions", "results", "situation", "timeline"]))
+    facts_text = _format_facts(stored_facts) if has_facts else ""
+    char_text = f"\nEach under {char_limit} chars." if char_limit else ""
+    source = f"VERIFIED FACTS:\n{facts_text}" if has_facts else f"ORIGINAL BULLET:\n{original_bullet}"
+
+    log.info(f"generate_bullet_combined - '{original_bullet[:50]}...'")
+
+    # STAGE 1: Generate 3 candidates (same as multi_candidate)
+    gen_prompt = f"""You are a resume writer who NEVER invents information.
+
+{source}
+
+JOB DESCRIPTION:
+{job_description}
+
+FORMAT: Use Google's XYZ structure (vary your phrasing across versions):
+- X = What you accomplished/delivered
+- Y = Measurable result/impact (only if in source!)
+- Z = How you did it (methods, tools, approach)
+
+⚠️ CONSTRAINT: Each version can ONLY use information from the source above.
+- No added metrics, tools, or details
+- If fit is poor, that's OK - write honest variations
+
+Generate 3 different versions (vary structure, emphasis, and phrasing - NOT facts):
+{char_text}
+VERSION 1: [bullet]
+VERSION 2: [bullet]
+VERSION 3: [bullet]"""
+
+    r1 = client.messages.create(model=CHAT_MODEL, max_tokens=1024, messages=[{"role": "user", "content": gen_prompt}], temperature=0.3)
+    candidates_raw = (r1.content[0].text or "").strip()
+    log.info(f"  Generated 3 candidates")
+
+    # STAGE 2: Critique ALL candidates for factual accuracy
+    critique_prompt = f"""Review these 3 bullet candidates for FACTUAL ACCURACY.
+
+SOURCE MATERIAL (the ONLY allowed information):
+{source}
+
+CANDIDATES:
+{candidates_raw}
+
+For EACH candidate, check:
+1. Does it contain ANY information not in the source? (CRITICAL FAILURE)
+2. Does it add metrics, tools, or details not in source? (FAILURE)
+3. Is it relevant to job and concise? (Quality check)
+
+Score each 1-5 on factual accuracy (5 = perfectly faithful, 1 = fabricates information).
+Return as:
+VERSION 1: [score] - [brief reason]
+VERSION 2: [score] - [brief reason]
+VERSION 3: [score] - [brief reason]
+BEST: [version number]"""
+
+    r2 = client.messages.create(model=CHAT_MODEL, max_tokens=512, messages=[{"role": "user", "content": critique_prompt}], temperature=0)
+    critique = (r2.content[0].text or "").strip()
+    log.info(f"  Critique: '{critique[:100]}...'")
+
+    # STAGE 3: Revise the best candidate based on critique
+    revise_prompt = f"""Based on the critique, select and refine the best bullet.
+
+CANDIDATES:
+{candidates_raw}
+
+CRITIQUE:
+{critique}
+
+SOURCE (your ONLY allowed information):
+{source}
+
+Take the version with highest factual accuracy score.
+If it had any issues noted, fix them by REMOVING fabricated information (not adding more).
+A modest honest bullet beats an impressive lie.
+{char_text}
+Return ONLY the final refined bullet."""
+
+    r3 = client.messages.create(model=CHAT_MODEL, max_tokens=256, messages=[{"role": "user", "content": revise_prompt}], temperature=0.1)
+    final = (r3.content[0].text or "").strip().lstrip("-• ")
+
+    # Clean up any version prefixes
+    for prefix in ["VERSION 1:", "VERSION 2:", "VERSION 3:", "Winner:", "Best:", "FINAL:"]:
+        if final.upper().startswith(prefix.upper()):
+            final = final[len(prefix):].strip()
+
+    log.info(f"  Final: '{final[:60]}...'")
+    return final
+
+
+def generate_bullets_batch(bullets_data: List[Dict], job_description: str,
+                           char_limit: Optional[int] = None) -> List[str]:
+    """
+    Batch Bullet Processing: Process multiple bullets together for coherent output.
+
+    This approach:
+    1. Sees all bullets at once for context
+    2. Ensures variety across bullets (no repetitive phrasing)
+    3. Strategically distributes keywords across the set
+
+    Args:
+        bullets_data: List of dicts with 'original_bullet' and 'stored_facts' keys
+        job_description: Target job description
+        char_limit: Optional character limit per bullet
+
+    Returns:
+        List of enhanced bullets in same order as input
+    """
+    if not client:
+        raise RuntimeError("ANTHROPIC_API_KEY missing")
+
+    if not bullets_data:
+        return []
+
+    log.info(f"generate_bullets_batch - Processing {len(bullets_data)} bullets together")
+
+    # Format all bullets with their facts
+    bullets_formatted = []
+    for i, item in enumerate(bullets_data, 1):
+        original = item.get("original_bullet", "")
+        facts = item.get("stored_facts", {})
+        has_facts = bool(facts and any(facts.get(c) for c in ["tools", "skills", "actions", "results", "situation", "timeline"]))
+
+        if has_facts:
+            facts_text = _format_facts(facts)
+            bullets_formatted.append(f"BULLET {i}:\nOriginal: {original}\nFacts: {facts_text}")
+        else:
+            bullets_formatted.append(f"BULLET {i}:\nOriginal: {original}\nFacts: (none - preserve original information)")
+
+    bullets_section = "\n\n".join(bullets_formatted)
+    char_text = f"\nKeep each bullet under {char_limit} characters." if char_limit else ""
+
+    # Single-stage batch generation with coherence instructions
+    batch_prompt = f"""You are a resume writer optimizing a SET of bullets together. NEVER invent information.
+
+JOB DESCRIPTION:
+{job_description}
+
+BULLETS TO OPTIMIZE:
+{bullets_section}
+
+FORMAT: Use Google's XYZ structure (vary phrasing across bullets):
+- X = What you accomplished/delivered
+- Y = Measurable result/impact (only if in source!)
+- Z = How you did it (methods, tools, approach)
+Good examples: "Reduced costs 20% by automating...", "Led team of 8 to deliver...", "Built pipeline processing 1M records using..."
+
+⚠️ CRITICAL CONSTRAINTS:
+- For each bullet, use ONLY the facts provided (or original if no facts)
+- Do NOT add metrics, tools, or details not in the source
+- If a bullet doesn't fit the job well, write the best honest version
+
+BATCH OPTIMIZATION GOALS:
+1. Vary sentence structures and XYZ phrasing across bullets (don't start all with same pattern)
+2. Distribute JD keywords strategically (don't repeat same keywords in every bullet)
+3. Lead with strongest/most relevant bullets' content
+4. Ensure each bullet stands alone but together tells a cohesive story
+{char_text}
+
+Return exactly {len(bullets_data)} bullets, numbered:
+1. [bullet]
+2. [bullet]
+...
+
+Return ONLY the numbered bullets, no commentary."""
+
+    r = client.messages.create(model=CHAT_MODEL, max_tokens=2048, messages=[{"role": "user", "content": batch_prompt}], temperature=0.2)
+    response = (r.content[0].text or "").strip()
+
+    # Parse numbered bullets from response
+    enhanced_bullets = []
+    lines = response.split("\n")
+    current_bullet = ""
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        # Check if line starts with a number
+        match = re.match(r'^(\d+)[.):]\s*(.+)$', line)
+        if match:
+            if current_bullet:
+                enhanced_bullets.append(current_bullet.lstrip("-• "))
+            current_bullet = match.group(2)
+        elif current_bullet:
+            # Continuation of previous bullet
+            current_bullet += " " + line
+
+    # Don't forget the last bullet
+    if current_bullet:
+        enhanced_bullets.append(current_bullet.lstrip("-• "))
+
+    # Ensure we have the right number of bullets
+    while len(enhanced_bullets) < len(bullets_data):
+        # Fallback: use original bullet
+        idx = len(enhanced_bullets)
+        enhanced_bullets.append(bullets_data[idx].get("original_bullet", ""))
+        log.warning(f"  Bullet {idx+1} missing from batch response, using original")
+
+    # Trim if we got too many
+    enhanced_bullets = enhanced_bullets[:len(bullets_data)]
+
+    for i, bullet in enumerate(enhanced_bullets):
+        log.info(f"  Bullet {i+1}: '{bullet[:60]}...'")
+
+    return enhanced_bullets
+
+
+def generate_bullet_batch_wrapper(original_bullet: str, job_description: str,
+                                   stored_facts: Dict, char_limit: Optional[int] = None,
+                                   _batch_context: Optional[Dict] = None) -> str:
+    """
+    Wrapper for batch processing that works with the single-bullet evaluation interface.
+
+    For proper batch processing, call generate_bullets_batch directly.
+    This wrapper exists for API compatibility with the evaluation framework.
+
+    When _batch_context is provided, it uses pre-computed batch results.
+    Otherwise, it processes the single bullet (losing batch benefits).
+    """
+    if _batch_context and original_bullet in _batch_context:
+        return _batch_context[original_bullet]
+
+    # Fallback: process single bullet (not ideal, but maintains compatibility)
+    bullets_data = [{"original_bullet": original_bullet, "stored_facts": stored_facts}]
+    results = generate_bullets_batch(bullets_data, job_description, char_limit)
+    return results[0] if results else original_bullet
 

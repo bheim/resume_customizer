@@ -18,7 +18,16 @@ import argparse
 from typing import Dict, List, Any
 from datetime import datetime
 from config import client, CHAT_MODEL, log
-from llm_utils import generate_bullet_with_facts, generate_bullet_with_facts_scaffolded
+from llm_utils import (
+    generate_bullet_with_facts,
+    generate_bullet_with_facts_scaffolded,
+    generate_bullet_self_critique,
+    generate_bullet_multi_candidate,
+    generate_bullet_hiring_manager,
+    generate_bullet_jd_mirror,
+    generate_bullet_combined,
+    generate_bullets_batch,
+)
 from json import loads
 import re
 
@@ -76,7 +85,9 @@ def llm_judge_single_bullet(
     jd: str,
     jd_type: str,
     has_context: bool,
-    bullet_label: str = "BULLET"
+    bullet_label: str = "BULLET",
+    original_bullet: str = None,
+    facts: Dict = None
 ) -> Dict[str, Any]:
     """
     Use LLM as judge to evaluate a single bullet.
@@ -86,57 +97,79 @@ def llm_judge_single_bullet(
     2. Conciseness (punchy vs verbose)
     3. Impact/Metrics clarity
     4. Action verb strength
-    5. Factual accuracy (no hallucination if no context)
+    5. Factual accuracy (compared to source material)
     6. JD keyword alignment
     """
 
-    context_note = "NO CONTEXT - Penalize hallucination" if not has_context else "WITH CONTEXT - Penalize adding unverified info"
+    # Build source material section for factual accuracy check
+    if original_bullet and bullet_label == "OPTIMIZED":
+        if has_context and facts:
+            facts_text = []
+            if facts.get("situation"): facts_text.append(f"Context: {facts['situation']}")
+            if facts.get("actions"): facts_text.append(f"Actions: {'; '.join(facts['actions'])}")
+            if facts.get("results"): facts_text.append(f"Results: {'; '.join(facts['results'])}")
+            if facts.get("skills"): facts_text.append(f"Skills: {', '.join(facts['skills'])}")
+            if facts.get("tools"): facts_text.append(f"Tools: {', '.join(facts['tools'])}")
+            source_section = f"""
+SOURCE MATERIAL (for factual accuracy check):
+Original bullet: {original_bullet}
+Verified facts:
+{chr(10).join(facts_text) if facts_text else 'None provided'}
+"""
+        else:
+            source_section = f"""
+SOURCE MATERIAL (for factual accuracy check):
+Original bullet: {original_bullet}
+(No additional facts provided - optimized should NOT add any information)
+"""
+        factual_instruction = """5. **Factual Accuracy** (1-10) - COMPARE TO SOURCE ABOVE
+   - Does the optimized bullet contain ONLY information from the source material?
+   - Any added metrics, tools, or details = LOW SCORE (1-4)
+   - Rephrasing is OK, inventing is NOT
+   - This is the MOST IMPORTANT dimension"""
+    else:
+        source_section = ""
+        factual_instruction = """5. **Factual Accuracy** (1-10)
+   - Does this bullet seem grounded and believable?
+   - Score based on specificity vs vagueness"""
 
-    prompt = f"""You are evaluating a resume bullet for quality and adherence to best practices.
+    prompt = f"""You are evaluating a resume bullet for quality.
 
 {bullet_label}:
 {bullet}
-
+{source_section}
 JOB TYPE: {jd_type}
 JOB DESCRIPTION:
 {jd}
-
-CONTEXT: {context_note}
 
 ---
 
 Score this bullet on these 6 dimensions (1-10 scale):
 
 1. **Relevance to JD** (1-10)
-   - Does it align with the job's key skills, technologies, and responsibilities?
-   - Would a hiring manager see this as relevant experience?
+   - Does it align with the job's key responsibilities?
+   - Would a hiring manager see this as relevant?
 
 2. **Conciseness** (1-10)
-   - Is it tight and punchy, or verbose with filler words?
-   - Does it end strong, or trail off with vague clauses?
-   - Are there unnecessary words like "comprehensive", "utilizing", "through data-driven insights"?
+   - Tight and punchy, or verbose?
+   - Does it end strong or trail off?
 
 3. **Impact & Metrics** (1-10)
-   - Are achievements quantified clearly?
-   - Is the business impact evident?
-   - Are metrics stated once in their most compelling form (not repeated)?
+   - Are achievements clear?
+   - Is business impact evident?
 
 4. **Action Verbs** (1-10)
-   - Strong ownership language (Developed, Led, Built)?
-   - Or weak verbs (Helped with, Supported, Streamlined)?
-   - Does it demonstrate initiative?
+   - Strong ownership (Developed, Led, Built)?
+   - Or weak verbs (Helped, Supported)?
 
-5. **Factual Accuracy** (1-10)
-   {'- NO CONTEXT: Did it invent metrics, technologies, or details not in original?' if not has_context else '- WITH CONTEXT: Did it stick to provided facts without adding extras?'}
-   {'- This is CRITICAL - any hallucination = instant low score' if not has_context else '- Should only use information from the verified facts'}
+{factual_instruction}
 
 6. **JD Keyword Alignment** (1-10)
-   - Does it use relevant terminology from the job description?
-   - Are key technologies/skills mentioned (when appropriate)?
+   - Uses relevant JD terminology?
 
 ---
 
-Return ONLY valid JSON (no commentary, no code fences):
+Return ONLY valid JSON:
 
 {{
   "relevance": X,
@@ -146,21 +179,22 @@ Return ONLY valid JSON (no commentary, no code fences):
   "factual_accuracy": X,
   "keyword_alignment": X,
   "total": X.X (average of above 6),
-  "reasoning": "2-3 sentence explanation of scores",
-  "issues": ["list", "of", "specific", "problems"],
-  "strengths": ["list", "of", "what", "worked", "well"]
+  "reasoning": "2-3 sentence explanation",
+  "issues": ["specific", "problems"],
+  "strengths": ["what", "worked"]
 }}
 
-Be strict and objective. A mediocre bullet should score 5-6, not 8-9."""
+Be strict. If optimized bullet added information not in source, factual_accuracy must be 1-4."""
 
     try:
-        r = client.chat.completions.create(
+        r = client.messages.create(
             model=CHAT_MODEL,
+            max_tokens=1024,
             messages=[{"role": "user", "content": prompt}],
             temperature=0
         )
 
-        raw = (r.choices[0].message.content or "").strip()
+        raw = (r.content[0].text or "").strip()
 
         # Clean code fences if present
         if raw.startswith("```"):
@@ -193,18 +227,24 @@ def compare_bullets(
     jd: str,
     jd_type: str,
     has_context: bool,
-    verbose: bool = False
+    verbose: bool = False,
+    facts: Dict = None
 ) -> Dict[str, Any]:
     """
     Score both original and optimized bullets, return both scores + deltas.
+    Now passes original bullet and facts to judge for proper factual accuracy assessment.
     """
     if verbose:
         print(f"  Scoring ORIGINAL bullet...")
-    baseline = llm_judge_single_bullet(original, jd, jd_type, has_context, "ORIGINAL BULLET")
+    baseline = llm_judge_single_bullet(original, jd, jd_type, has_context, "ORIGINAL")
 
     if verbose:
         print(f"  Scoring OPTIMIZED bullet...")
-    optimized_scores = llm_judge_single_bullet(optimized, jd, jd_type, has_context, "OPTIMIZED BULLET")
+    # Pass original and facts so judge can check for hallucination
+    optimized_scores = llm_judge_single_bullet(
+        optimized, jd, jd_type, has_context, "OPTIMIZED",
+        original_bullet=original, facts=facts
+    )
 
     # Calculate deltas
     dimensions = ["relevance", "conciseness", "impact", "action_verbs", "factual_accuracy", "keyword_alignment"]
@@ -221,16 +261,35 @@ def compare_bullets(
     }
 
 
-def run_evaluation(bullets_csv: str = "bullets.csv", jobs_csv: str = "jobs.csv", verbose: bool = False, approach: str = "both") -> Dict[str, List[Dict]]:
+def run_evaluation(bullets_csv: str = "bullets.csv", jobs_csv: str = "jobs.csv", verbose: bool = False, approach: str = "all") -> Dict[str, List[Dict]]:
     """
     Run full evaluation across all bullets and job types.
 
     Args:
-        approach: "single", "scaffolded", or "both" (default: "both")
+        approach: "single", "scaffolded", "self_critique", "multi_candidate",
+                  "hiring_manager", "jd_mirror", "all", or "experimental" (new 4 only)
 
     Returns:
-        Dict with "single_stage" and/or "scaffolded" results
+        Dict with results per approach
     """
+
+    # Define all available approaches
+    ALL_APPROACHES = {
+        "single_stage": generate_bullet_with_facts,
+        "scaffolded": generate_bullet_with_facts_scaffolded,
+        "self_critique": generate_bullet_self_critique,
+        "multi_candidate": generate_bullet_multi_candidate,
+        "hiring_manager": generate_bullet_hiring_manager,
+        "jd_mirror": generate_bullet_jd_mirror,
+        "combined": generate_bullet_combined,
+    }
+
+    # Batch approach requires special handling (defined below)
+    BATCH_APPROACH = "batch"
+
+    EXPERIMENTAL = ["self_critique", "multi_candidate", "hiring_manager", "jd_mirror"]
+    NEW_APPROACHES = ["combined", "batch"]  # The two newest approaches
+    BASELINE = ["single_stage", "scaffolded"]
 
     print(f"\n{'='*80}")
     print("PROMPT EVALUATION - Head-to-Head Comparison")
@@ -245,10 +304,28 @@ def run_evaluation(bullets_csv: str = "bullets.csv", jobs_csv: str = "jobs.csv",
 
     # Determine which approaches to test
     approaches_to_test = []
-    if approach in ["single", "both"]:
-        approaches_to_test.append(("single_stage", generate_bullet_with_facts))
-    if approach in ["scaffolded", "both"]:
-        approaches_to_test.append(("scaffolded", generate_bullet_with_facts_scaffolded))
+    include_batch = False
+
+    if approach == "all":
+        approaches_to_test = [(name, func) for name, func in ALL_APPROACHES.items()]
+        include_batch = True
+    elif approach == "experimental":
+        approaches_to_test = [(name, ALL_APPROACHES[name]) for name in EXPERIMENTAL]
+    elif approach == "baseline":
+        approaches_to_test = [(name, ALL_APPROACHES[name]) for name in BASELINE]
+    elif approach == "new":
+        approaches_to_test = [(name, ALL_APPROACHES[name]) for name in NEW_APPROACHES if name in ALL_APPROACHES]
+        include_batch = True
+    elif approach == "batch":
+        include_batch = True
+    elif approach in ALL_APPROACHES:
+        approaches_to_test = [(approach, ALL_APPROACHES[approach])]
+    else:
+        # Legacy support
+        if approach in ["single", "both"]:
+            approaches_to_test.append(("single_stage", generate_bullet_with_facts))
+        if approach in ["scaffolded", "both"]:
+            approaches_to_test.append(("scaffolded", generate_bullet_with_facts_scaffolded))
 
     for approach_name, generator_func in approaches_to_test:
         print(f"\n{'='*80}")
@@ -294,7 +371,8 @@ def run_evaluation(bullets_csv: str = "bullets.csv", jobs_csv: str = "jobs.csv",
 
                     # Compare original vs optimized (gets baseline, optimized scores, and deltas)
                     comparison = compare_bullets(
-                        bullet_text, optimized, jd_text, jd_type, has_context, verbose
+                        bullet_text, optimized, jd_text, jd_type, has_context, verbose,
+                        facts=facts  # Pass facts for proper factual accuracy assessment
                     )
 
                     baseline = comparison['baseline']
@@ -347,6 +425,85 @@ def run_evaluation(bullets_csv: str = "bullets.csv", jobs_csv: str = "jobs.csv",
                     })
 
         results_by_approach[approach_name] = results
+
+    # Handle batch approach separately (processes all bullets together per JD)
+    if include_batch:
+        print(f"\n{'='*80}")
+        print(f"TESTING: BATCH (processes all bullets together)")
+        print(f"{'='*80}\n")
+
+        results = []
+        test_num = 0
+
+        for jd in job_descriptions:
+            jd_id = jd['id']
+            jd_type = jd['type']
+            jd_title = jd['title']
+            jd_text = jd['description']
+
+            print(f"\n{'─'*80}")
+            print(f"JOB: {jd_title} ({jd_type})")
+            print(f"Processing {len(bullets)} bullets as a batch...")
+            print(f"{'─'*80}\n")
+
+            try:
+                # Prepare batch data
+                bullets_data = [
+                    {"original_bullet": b['bullet'], "stored_facts": b['facts']}
+                    for b in bullets
+                ]
+
+                # Generate all bullets together
+                optimized_bullets = generate_bullets_batch(bullets_data, jd_text)
+
+                # Score each bullet individually
+                for i, (bullet_data, optimized) in enumerate(zip(bullets, optimized_bullets)):
+                    test_num += 1
+                    bullet_id = bullet_data['id']
+                    bullet_text = bullet_data['bullet']
+                    has_context = bullet_data['has_context']
+                    facts = bullet_data['facts']
+
+                    print(f"[{test_num}] {bullet_id}")
+
+                    if verbose:
+                        print(f"  Original:  {bullet_text}")
+                        print(f"  Optimized: {optimized}")
+
+                    # Compare original vs optimized
+                    comparison = compare_bullets(
+                        bullet_text, optimized, jd_text, jd_type, has_context, verbose,
+                        facts=facts
+                    )
+
+                    baseline = comparison['baseline']
+                    optimized_scores = comparison['optimized']
+                    deltas = comparison['deltas']
+
+                    delta_total = deltas['total']
+                    delta_str = f"+{delta_total:.1f}" if delta_total > 0 else f"{delta_total:.1f}"
+
+                    print(f"  Baseline: {baseline['total']:.1f}/10 → Optimized: {optimized_scores['total']:.1f}/10 ({delta_str})")
+
+                    results.append({
+                        'bullet_id': bullet_id,
+                        'has_context': has_context,
+                        'jd_id': jd_id,
+                        'jd_type': jd_type,
+                        'jd_title': jd_title,
+                        'original': bullet_text,
+                        'optimized': optimized,
+                        'baseline_scores': baseline,
+                        'optimized_scores': optimized_scores,
+                        'deltas': deltas,
+                        'timestamp': datetime.now().isoformat()
+                    })
+
+            except Exception as e:
+                log.exception(f"Error in batch processing for {jd_id}: {e}")
+                print(f"  ❌ ERROR: {str(e)}")
+
+        results_by_approach["batch"] = results
 
     return results_by_approach
 
@@ -428,30 +585,47 @@ def print_summary(results_by_approach: Dict[str, List[Dict]]):
             delta = r['deltas']['total']
             print(f"  {delta:+.1f} | {r['bullet_id']:30s} | {r['jd_type']}")
 
-    # If comparing multiple approaches, do head-to-head
-    if len(results_by_approach) == 2:
+    # If comparing multiple approaches, show leaderboard
+    if len(results_by_approach) >= 2:
         print(f"\n{'='*80}")
-        print("HEAD-TO-HEAD WINNER")
+        print("LEADERBOARD - APPROACH COMPARISON")
         print(f"{'='*80}\n")
 
-        approaches = list(results_by_approach.keys())
-        results1 = [r for r in results_by_approach[approaches[0]] if 'deltas' in r]
-        results2 = [r for r in results_by_approach[approaches[1]] if 'deltas' in r]
+        # Calculate stats for each approach
+        approach_stats = []
+        for name, results in results_by_approach.items():
+            valid = [r for r in results if 'deltas' in r]
+            if valid:
+                avg_delta = sum(r['deltas']['total'] for r in valid) / len(valid)
+                avg_optimized = sum(r['optimized_scores']['total'] for r in valid) / len(valid)
+                improvements = sum(1 for r in valid if r['deltas']['total'] > 0)
+                pct_improved = improvements / len(valid) * 100
+                approach_stats.append({
+                    'name': name,
+                    'avg_delta': avg_delta,
+                    'avg_optimized': avg_optimized,
+                    'pct_improved': pct_improved,
+                    'n': len(valid)
+                })
 
-        avg_delta1 = sum(r['deltas']['total'] for r in results1) / len(results1) if results1 else 0
-        avg_delta2 = sum(r['deltas']['total'] for r in results2) / len(results2) if results2 else 0
+        # Sort by avg_delta (best improvement first)
+        approach_stats.sort(key=lambda x: x['avg_delta'], reverse=True)
 
-        print(f"{approaches[0]}: Δ {avg_delta1:+.2f} avg improvement")
-        print(f"{approaches[1]}: Δ {avg_delta2:+.2f} avg improvement\n")
+        print(f"{'Rank':<5} {'Approach':<20} {'Avg Δ':>8} {'Avg Score':>10} {'% Improved':>12}")
+        print("-" * 60)
+        for i, stats in enumerate(approach_stats, 1):
+            medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else "  "
+            print(f"{medal}{i:<3} {stats['name']:<20} {stats['avg_delta']:>+7.2f} {stats['avg_optimized']:>9.2f} {stats['pct_improved']:>11.1f}%")
 
-        if avg_delta1 > avg_delta2:
-            diff = avg_delta1 - avg_delta2
-            print(f"🏆 WINNER: {approaches[0].upper()} (+{diff:.2f} points better)")
-        elif avg_delta2 > avg_delta1:
-            diff = avg_delta2 - avg_delta1
-            print(f"🏆 WINNER: {approaches[1].upper()} (+{diff:.2f} points better)")
-        else:
-            print("🤝 TIE: Both approaches perform equally")
+        print()
+
+        # Show winner
+        if approach_stats:
+            winner = approach_stats[0]
+            print(f"🏆 WINNER: {winner['name'].upper()}")
+            print(f"   Average improvement: {winner['avg_delta']:+.2f} points")
+            print(f"   Average optimized score: {winner['avg_optimized']:.2f}/10")
+            print(f"   Improved {winner['pct_improved']:.1f}% of bullets")
 
     print(f"\n{'='*80}\n")
 
@@ -479,12 +653,23 @@ def main():
     parser = argparse.ArgumentParser(description='Evaluate prompt performance - Head-to-Head Comparison')
     parser.add_argument('--bullets', default='bullets.csv', help='Path to bullets CSV file')
     parser.add_argument('--jobs', default='jobs.csv', help='Path to jobs CSV file')
-    parser.add_argument('--approach', default='both', choices=['single', 'scaffolded', 'both'],
-                       help='Which approach to test: single, scaffolded, or both (default: both)')
+    parser.add_argument('--approach', default='all',
+                       choices=['single_stage', 'scaffolded', 'self_critique', 'multi_candidate',
+                                'hiring_manager', 'jd_mirror', 'combined', 'batch',
+                                'all', 'experimental', 'baseline', 'new',
+                                'single', 'both'],  # legacy support
+                       help='Which approach(es) to test (default: all)')
     parser.add_argument('--save', help='Save detailed results to JSON file')
     parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output')
 
     args = parser.parse_args()
+
+    print("\nApproach options:")
+    print("  all          - Test all 8 approaches")
+    print("  new          - Test 2 newest approaches (combined, batch)")
+    print("  experimental - Test 4 approaches (self_critique, multi_candidate, hiring_manager, jd_mirror)")
+    print("  baseline     - Test 2 original approaches (single_stage, scaffolded)")
+    print("  [name]       - Test specific approach (combined, batch, etc.)\n")
 
     # Run evaluation
     results_by_approach = run_evaluation(args.bullets, args.jobs, args.verbose, args.approach)

@@ -16,7 +16,7 @@ from docx_utils import collect_word_numbered_bullets
 from llm_utils import (
     embed,
     extract_facts_from_qa,
-    generate_bullet_with_facts,
+    generate_bullet_self_critique,
     generate_followup_questions,
     should_ask_more_questions
 )
@@ -453,7 +453,7 @@ async def generate_resume_with_facts(
 
             if facts:
                 # Generate with facts
-                enhanced = generate_bullet_with_facts(
+                enhanced = generate_bullet_self_critique(
                     bullet,
                     request.job_description,
                     facts

@@ -971,6 +971,11 @@ TOOLS: Only mention tools that are:
 - Essential to understanding the achievement
 OMIT basic tools: Excel, pivot tables, Word, PowerPoint, email, "various tools"
 
+CONCISENESS: Cut filler ruthlessly.
+- Use tool names directly: "SQL" not "SQL-based data extraction"
+- Cut meaningless phrases: "data-driven strategies", "leveraging insights", "utilizing methodologies"
+- Every word must earn its place - if removing it doesn't lose meaning, remove it
+
 ⚠️ CONSTRAINT: Use ONLY information from the source above. Add nothing.
 If fit is poor, that's OK - write the best honest bullet you can.
 {char_text}
@@ -993,7 +998,10 @@ Check:
 1. Does the bullet contain ANY information not in the source? (This is a failure)
 2. Does it follow XYZ structure (accomplishment + result + method)? Phrasing can vary.
 3. Is it relevant to the job?
-4. Is it concise?
+4. Is it concise? Flag verbose filler like:
+   - "SQL-based data extraction" (should be "SQL")
+   - "data-driven strategies", "leveraging insights", "utilizing methodologies"
+   - Any phrase that can be cut without losing meaning
 
 List specific issues. If it added information not in source, that's the #1 problem."""
 

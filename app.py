@@ -792,15 +792,17 @@ async def generate_keywords_only(request: BulletGenerationRequest):
     log.info(f"/v2/apply/generate_keywords_only called for user {request.user_id} with {len(request.bullets)} bullets")
 
     try:
-        from llm_utils import optimize_keywords_light_touch
+        from llm_utils import optimize_keywords_light_touch, deduplicate_repeated_words
 
-        # For each bullet, optimize keywords only (no facts needed)
+        # Step 1: Optimize each bullet individually for keywords
         enhanced_bullets = []
+        original_bullets_list = []
 
         for idx, bullet_item in enumerate(request.bullets):
             bullet_text = bullet_item.bullet_text
+            original_bullets_list.append(bullet_text)
 
-            log.info(f"Optimizing bullet {idx} with keyword-only approach")
+            log.info(f"Optimizing bullet {idx+1}/{len(request.bullets)} with keyword-only approach")
 
             # Use light_touch keyword optimization (no facts, just terminology alignment)
             enhanced_text = optimize_keywords_light_touch(
@@ -808,22 +810,35 @@ async def generate_keywords_only(request: BulletGenerationRequest):
                 request.job_description
             )
 
-            # Add to results
-            enhanced_bullets.append({
-                "original": bullet_text,
-                "enhanced": enhanced_text,
-                "used_facts": False  # Always false for keyword-only mode
-            })
+            enhanced_bullets.append(enhanced_text)
 
         log.info(f"Generated {len(enhanced_bullets)} keyword-optimized bullets")
 
-        # Calculate comparative LLM scores for before/after evaluation
+        # Step 2: Deduplicate repeated words across all bullets
+        log.info("Running deduplication pass to diversify vocabulary across bullets")
+        deduplicated_bullets = deduplicate_repeated_words(
+            enhanced_bullets,
+            request.job_description
+        )
+
+        # Step 3: Format results with original/enhanced pairs
+        enhanced_bullets = []
+        for idx, (original, deduplicated) in enumerate(zip(original_bullets_list, deduplicated_bullets)):
+            enhanced_bullets.append({
+                "original": original,
+                "enhanced": deduplicated,
+                "used_facts": False  # Always false for keyword-only mode
+            })
+
+        log.info(f"Deduplication complete - final {len(enhanced_bullets)} bullets ready")
+
+        # Step 4: Calculate comparative LLM scores for before/after evaluation
         try:
             from llm_utils import llm_comparative_score
 
             log.info("Calculating comparative LLM scores for before/after evaluation")
 
-            # Extract bullet lists for comparative scoring
+            # Extract bullet lists for comparative scoring (using deduplicated results)
             original_bullets = [b["original"] for b in enhanced_bullets]
             enhanced_bullets_list = [b["enhanced"] for b in enhanced_bullets]
 

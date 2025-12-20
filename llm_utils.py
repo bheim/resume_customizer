@@ -1315,6 +1315,82 @@ Return ONLY the bullet with your one change (or original if no safe change), not
     return result
 
 
+def deduplicate_repeated_words(optimized_bullets: List[str], job_description: str) -> List[str]:
+    """
+    Post-process a list of optimized bullets to remove repetitive vocabulary.
+
+    This addresses the problem where optimizing bullets individually can lead to
+    the same action verbs appearing too frequently across the resume.
+
+    Args:
+        optimized_bullets: List of bullets that have already been optimized
+        job_description: Job description to maintain keyword alignment
+
+    Returns:
+        List of bullets with diversified vocabulary while maintaining facts and keywords
+    """
+    if not client:
+        raise RuntimeError("ANTHROPIC_API_KEY missing")
+
+    if len(optimized_bullets) <= 1:
+        # No deduplication needed for single bullet
+        return optimized_bullets
+
+    log.info(f"deduplicate_repeated_words - Processing {len(optimized_bullets)} bullets")
+
+    # Format bullets with numbers for clarity
+    bullets_text = "\n".join(f"{i+1}. {bullet}" for i, bullet in enumerate(optimized_bullets))
+
+    prompt = f"""These resume bullets were independently optimized and now have repetitive vocabulary.
+Please diversify the action verbs and phrasing while maintaining ALL facts and keyword alignment.
+
+JOB DESCRIPTION (maintain alignment with these keywords):
+{job_description}
+
+CURRENT BULLETS (notice repetitive words):
+{bullets_text}
+
+RULES:
+1. Keep ALL facts, metrics, tools, and accomplishments exactly as stated
+2. Vary action verbs across bullets (if "generated" appears multiple times, use "developed", "created", "built" in other bullets)
+3. Maintain keyword alignment with job description
+4. Do NOT add new information, metrics, or claims
+5. Do NOT remove any factual content
+
+GOAL: Same factual content, same keyword optimization, but more varied vocabulary.
+
+Return the improved bullets in the SAME ORDER, one per line, numbered 1-{len(optimized_bullets)}."""
+
+    response = client.messages.create(
+        model=CHAT_MODEL,
+        max_tokens=2048,  # Enough for multiple bullets
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.3  # Slight creativity for variety, but still conservative
+    )
+
+    result_text = (response.content[0].text or "").strip()
+
+    # Parse the response back into a list
+    # Handle numbered format: "1. Bullet text\n2. Bullet text..."
+    lines = result_text.split('\n')
+    deduplicated = []
+
+    for line in lines:
+        # Strip number prefix if present (e.g., "1. " or "1) ")
+        cleaned = re.sub(r'^\s*\d+[\.\)]\s*', '', line).strip().lstrip("-• ")
+        if cleaned:  # Only add non-empty lines
+            deduplicated.append(cleaned)
+
+    # Fallback: if parsing failed, return original
+    if len(deduplicated) != len(optimized_bullets):
+        log.warning(f"Deduplication parsing failed: expected {len(optimized_bullets)} bullets, got {len(deduplicated)}. Using original.")
+        return optimized_bullets
+
+    log.info(f"Deduplication complete - {len(deduplicated)} bullets diversified")
+
+    return deduplicated
+
+
 def generate_bullet_hiring_manager(original_bullet: str, job_description: str,
                                     stored_facts: Dict, char_limit: Optional[int] = None) -> str:
     """

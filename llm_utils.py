@@ -1101,6 +1101,220 @@ Return ONLY the winning bullet text (no "VERSION X:")."""
     return selected
 
 
+def optimize_keywords_factual_first(original_bullet: str, job_description: str,
+                                     stored_facts: Dict = None, char_limit: Optional[int] = None) -> str:
+    """
+    Factual-First Keyword Optimization: Preserve facts as a hard constraint.
+
+    This approach treats factual accuracy as non-negotiable:
+    1. Only allows synonym swaps where meanings are IDENTICAL
+    2. Never adds claims, tools, metrics, or qualifiers not in original
+    3. If unsure, keeps original wording
+    4. Keyword improvement is secondary to factual preservation
+    """
+    if not client:
+        raise RuntimeError("ANTHROPIC_API_KEY missing")
+
+    log.info(f"optimize_keywords_factual_first - '{original_bullet[:50]}...'")
+    char_text = f"Stay under {char_limit} characters." if char_limit else ""
+
+    prompt = f"""You are optimizing a resume bullet for ATS keyword matching.
+
+ORIGINAL BULLET:
+{original_bullet}
+
+JOB DESCRIPTION:
+{job_description}
+
+YOUR TASK: Make MINIMAL changes to incorporate relevant keywords from the job description.
+
+STRICT RULES (VIOLATIONS ARE UNACCEPTABLE):
+1. NEVER add tools, technologies, or skills not explicitly mentioned in the original (e.g., don't add "SQL", "Python", "Tableau" unless the original already mentions them)
+2. NEVER add metrics, numbers, or quantifications not in the original
+3. NEVER add qualifiers like "evidence-based", "data-driven", "cross-functional" unless the original already uses them
+4. NEVER change the core action or achievement described
+5. NEVER invent context or expand scope beyond what's stated
+
+ALLOWED CHANGES (USE SPARINGLY):
+- Swap a word for a JD synonym with IDENTICAL meaning (e.g., "conducted analysis" → "performed analysis")
+- Reorder words slightly if it doesn't change meaning
+- Minor phrasing adjustments that preserve exact meaning
+
+IF IN DOUBT: Keep the original wording. A missed keyword is better than a fabricated claim.
+
+{char_text}
+
+Return ONLY the optimized bullet, nothing else."""
+
+    response = client.messages.create(
+        model=CHAT_MODEL,
+        max_tokens=256,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0
+    )
+
+    result = (response.content[0].text or "").strip().lstrip("-• ")
+    log.info(f"  Result: '{result[:60]}...'")
+    return result
+
+
+def optimize_keywords_synonym_only(original_bullet: str, job_description: str,
+                                    stored_facts: Dict = None, char_limit: Optional[int] = None) -> str:
+    """
+    Synonym-Only: ONLY allows 1:1 word swaps where meanings are identical.
+
+    This is the most conservative approach - no rephrasing, no additions,
+    just direct synonym swaps where the JD uses a different word for the same concept.
+    """
+    if not client:
+        raise RuntimeError("ANTHROPIC_API_KEY missing")
+
+    log.info(f"optimize_keywords_synonym_only - '{original_bullet[:50]}...'")
+    char_text = f"Stay under {char_limit} characters." if char_limit else ""
+
+    prompt = f"""Find words in this bullet that can be swapped with EXACT synonyms from the job description.
+
+ORIGINAL BULLET:
+{original_bullet}
+
+JOB DESCRIPTION:
+{job_description}
+
+RULES:
+1. ONLY swap a word if the JD uses a different word with the EXACT SAME meaning
+2. Examples of valid swaps:
+   - "conducted" → "performed" (same meaning)
+   - "built" → "developed" (same meaning)
+   - "customers" → "users" (same meaning if context fits)
+3. Examples of INVALID swaps (DO NOT DO):
+   - "analysis" → "market research and competitive analysis" (adding words)
+   - "planning" → "strategic planning" (adding qualifier)
+   - Adding any word that wasn't there before
+4. If no valid synonym swaps exist, return the original bullet unchanged
+5. Maximum 2-3 word swaps per bullet
+
+{char_text}
+
+Return ONLY the bullet (original or with swaps), nothing else."""
+
+    response = client.messages.create(
+        model=CHAT_MODEL,
+        max_tokens=256,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0
+    )
+
+    result = (response.content[0].text or "").strip().lstrip("-• ")
+    log.info(f"  Result: '{result[:60]}...'")
+    return result
+
+
+def optimize_keywords_light_touch(original_bullet: str, job_description: str,
+                                   stored_facts: Dict = None, char_limit: Optional[int] = None) -> str:
+    """
+    Light Touch: Small adjustments allowed, but with explicit guardrails.
+
+    Allows minor rephrasing beyond pure synonyms, but with a clear list of
+    what is and isn't allowed.
+    """
+    if not client:
+        raise RuntimeError("ANTHROPIC_API_KEY missing")
+
+    log.info(f"optimize_keywords_light_touch - '{original_bullet[:50]}...'")
+    char_text = f"Stay under {char_limit} characters." if char_limit else ""
+
+    prompt = f"""Make small adjustments to align this bullet with the job description keywords.
+
+ORIGINAL BULLET:
+{original_bullet}
+
+JOB DESCRIPTION:
+{job_description}
+
+ALLOWED (small adjustments):
+✓ Swap synonyms (e.g., "built" → "developed")
+✓ Reorder words slightly if meaning unchanged
+✓ Use JD phrasing for concepts already present (e.g., if bullet says "talked to users" and JD says "user research", can say "conducted user research" IF the bullet already describes research activities)
+
+FORBIDDEN (these invalidate the bullet):
+✗ Adding tools/technologies not mentioned (SQL, Python, Tableau, etc.)
+✗ Adding metrics or numbers not in original
+✗ Adding audiences not mentioned (stakeholders, leadership, clients)
+✗ Adding qualifiers that change scope (cross-functional, enterprise-wide, etc.)
+✗ Adding deliverables not mentioned (frameworks, models, recommendations)
+✗ Changing what was actually done
+
+GOAL: A hiring manager reading both versions should believe they describe the exact same work.
+
+{char_text}
+
+Return ONLY the adjusted bullet, nothing else."""
+
+    response = client.messages.create(
+        model=CHAT_MODEL,
+        max_tokens=256,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0
+    )
+
+    result = (response.content[0].text or "").strip().lstrip("-• ")
+    log.info(f"  Result: '{result[:60]}...'")
+    return result
+
+
+def optimize_keywords_one_change(original_bullet: str, job_description: str,
+                                  stored_facts: Dict = None, char_limit: Optional[int] = None) -> str:
+    """
+    One Change Only: Make exactly ONE keyword improvement, the safest one.
+
+    Forces the model to pick the single best, safest keyword swap rather
+    than trying to optimize everything at once.
+    """
+    if not client:
+        raise RuntimeError("ANTHROPIC_API_KEY missing")
+
+    log.info(f"optimize_keywords_one_change - '{original_bullet[:50]}...'")
+    char_text = f"Stay under {char_limit} characters." if char_limit else ""
+
+    prompt = f"""Make exactly ONE small change to add a keyword from the job description.
+
+ORIGINAL BULLET:
+{original_bullet}
+
+JOB DESCRIPTION:
+{job_description}
+
+INSTRUCTIONS:
+1. Find the ONE safest word swap or minor adjustment that adds a JD keyword
+2. The change must not alter the meaning of what was done
+3. If you can't find a safe change, return the original unchanged
+
+Examples of safe single changes:
+- "conducted analysis" → "conducted market analysis" (if analysis was of a market)
+- "built framework" → "developed framework" (verb swap)
+- "informed decisions" → "informed strategic decisions" (if decisions were strategic)
+
+DO NOT:
+- Add tools, metrics, or audiences not in the original
+- Make multiple changes
+- Change what was actually accomplished
+
+{char_text}
+
+Return ONLY the bullet with your one change (or original if no safe change), nothing else."""
+
+    response = client.messages.create(
+        model=CHAT_MODEL,
+        max_tokens=256,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0
+    )
+
+    result = (response.content[0].text or "").strip().lstrip("-• ")
+    log.info(f"  Result: '{result[:60]}...'")
+    return result
+
+
 def generate_bullet_hiring_manager(original_bullet: str, job_description: str,
                                     stored_facts: Dict, char_limit: Optional[int] = None) -> str:
     """
@@ -1445,4 +1659,344 @@ def generate_bullet_batch_wrapper(original_bullet: str, job_description: str,
     bullets_data = [{"original_bullet": original_bullet, "stored_facts": stored_facts}]
     results = generate_bullets_batch(bullets_data, job_description, char_limit)
     return results[0] if results else original_bullet
+
+
+# =============================================================================
+# KEYWORD-ONLY OPTIMIZATION APPROACHES
+# =============================================================================
+
+def optimize_keywords_simple(original_bullet: str, job_description: str,
+                             stored_facts: Dict = None, char_limit: Optional[int] = None) -> str:
+    """
+    Simple Keyword Optimization: Swap synonyms with JD terminology.
+
+    This is the most conservative approach:
+    - Keep bullet structure exactly the same
+    - Only swap words with synonyms from the JD
+    - Do NOT change meaning, just terminology
+    """
+    if not client:
+        raise RuntimeError("ANTHROPIC_API_KEY missing")
+
+    log.info(f"optimize_keywords_simple - '{original_bullet[:50]}...'")
+    char_text = f"\nKeep under {char_limit} characters." if char_limit else ""
+
+    prompt = f"""You are optimizing a resume bullet for ATS keyword matching.
+
+ORIGINAL BULLET:
+{original_bullet}
+
+JOB DESCRIPTION:
+{job_description}
+
+YOUR TASK: Swap words with synonyms from the job description.
+
+RULES:
+1. PRESERVE the exact structure and meaning of the bullet
+2. ONLY swap words that have exact synonyms in the JD
+3. Do NOT add new information, metrics, or claims
+4. Do NOT change action verbs unless there's an exact synonym in JD
+5. Do NOT restructure the sentence
+6. Keep all original facts, numbers, and specifics exactly as they are
+
+EXAMPLES of acceptable swaps:
+- "built" → "developed" (if JD uses "developed")
+- "analyzed" → "assessed" (if JD uses "assessed")
+- "customers" → "clients" (if JD uses "clients")
+- "improved" → "optimized" (if JD uses "optimized")
+
+EXAMPLES of unacceptable changes:
+- Adding "cross-functional" when not in original
+- Adding percentages or metrics
+- Changing "helped with" to "led" (that changes meaning)
+- Adding technologies not mentioned in original
+{char_text}
+Return ONLY the optimized bullet with keyword swaps. No explanation."""
+
+    r = client.messages.create(
+        model=CHAT_MODEL,
+        max_tokens=512,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.1  # Very low - we want minimal creativity
+    )
+
+    result = (r.content[0].text or "").strip().lstrip("-• ")
+    log.info(f"  Result: '{result[:60]}...'")
+    return result
+
+
+def optimize_keywords_targeted(original_bullet: str, job_description: str,
+                               stored_facts: Dict = None, char_limit: Optional[int] = None) -> str:
+    """
+    Targeted Keyword Optimization: Extract JD keywords first, then inject.
+
+    Two-stage approach:
+    1. Extract key terms from JD that could apply to this bullet
+    2. Inject those terms while preserving meaning
+    """
+    if not client:
+        raise RuntimeError("ANTHROPIC_API_KEY missing")
+
+    log.info(f"optimize_keywords_targeted - '{original_bullet[:50]}...'")
+    char_text = f"\nKeep under {char_limit} characters." if char_limit else ""
+
+    # STAGE 1: Extract relevant JD keywords for this specific bullet
+    extract_prompt = f"""Identify JD keywords that could naturally fit this bullet.
+
+BULLET:
+{original_bullet}
+
+JOB DESCRIPTION:
+{job_description}
+
+List 3-5 specific keywords/phrases from the JD that:
+1. Are relevant to what this bullet describes
+2. Could replace or supplement existing words
+3. Are ATS-important (skills, tools, methodologies, domains)
+
+Focus on NOUNS and ACTION VERBS, not generic modifiers.
+Return just the keywords, one per line."""
+
+    r1 = client.messages.create(
+        model=CHAT_MODEL,
+        max_tokens=256,
+        messages=[{"role": "user", "content": extract_prompt}],
+        temperature=0
+    )
+    keywords = (r1.content[0].text or "").strip()
+    log.info(f"  Extracted keywords: {keywords[:80]}...")
+
+    # STAGE 2: Inject keywords while preserving meaning
+    inject_prompt = f"""Inject these JD keywords into the bullet while preserving its meaning.
+
+ORIGINAL BULLET:
+{original_bullet}
+
+KEYWORDS TO INCORPORATE:
+{keywords}
+
+RULES:
+1. Keep the original meaning and facts exactly the same
+2. Swap existing words with keyword synonyms where natural
+3. Add brief keyword phrases ONLY if they clarify existing content
+4. Do NOT add new claims, metrics, or achievements
+5. Do NOT change the action or outcome described
+6. Keep it natural - don't force keywords that don't fit
+{char_text}
+Return ONLY the keyword-optimized bullet. No explanation."""
+
+    r2 = client.messages.create(
+        model=CHAT_MODEL,
+        max_tokens=512,
+        messages=[{"role": "user", "content": inject_prompt}],
+        temperature=0.1
+    )
+
+    result = (r2.content[0].text or "").strip().lstrip("-• ")
+    log.info(f"  Result: '{result[:60]}...'")
+    return result
+
+
+def optimize_keywords_aggressive(original_bullet: str, job_description: str,
+                                  stored_facts: Dict = None, char_limit: Optional[int] = None) -> str:
+    """
+    Aggressive Keyword Optimization: Maximize keyword density.
+
+    More liberal approach that:
+    - Injects more JD terminology
+    - May slightly restructure for keyword placement
+    - Still preserves core meaning and facts
+    """
+    if not client:
+        raise RuntimeError("ANTHROPIC_API_KEY missing")
+
+    log.info(f"optimize_keywords_aggressive - '{original_bullet[:50]}...'")
+    char_text = f"\nKeep under {char_limit} characters." if char_limit else ""
+
+    prompt = f"""You are an ATS optimization expert. Maximize keyword alignment with the JD.
+
+ORIGINAL BULLET:
+{original_bullet}
+
+JOB DESCRIPTION:
+{job_description}
+
+YOUR TASK: Rewrite to maximize ATS keyword matching while preserving facts.
+
+WHAT YOU CAN DO:
+✓ Replace words with JD terminology (synonyms)
+✓ Add brief qualifying phrases using JD keywords (e.g., "using data-driven approach")
+✓ Reorder clauses to front-load important keywords
+✓ Add domain context using JD terminology
+
+WHAT YOU CANNOT DO:
+✗ Add metrics, percentages, or numbers not in original
+✗ Add tools or technologies not in original
+✗ Change the core achievement or action
+✗ Invent new responsibilities or outcomes
+✗ Make vague claims specific
+
+The bullet should still be factually identical to the original - just expressed
+using the job description's vocabulary and terminology.
+{char_text}
+Return ONLY the optimized bullet. No explanation."""
+
+    r = client.messages.create(
+        model=CHAT_MODEL,
+        max_tokens=512,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2
+    )
+
+    result = (r.content[0].text or "").strip().lstrip("-• ")
+    log.info(f"  Result: '{result[:60]}...'")
+    return result
+
+
+def optimize_keywords_with_context(original_bullet: str, job_description: str,
+                                    stored_facts: Dict = None, char_limit: Optional[int] = None) -> str:
+    """
+    Context-Aware Keyword Optimization: Uses stored facts to inform keyword choices.
+
+    If facts are available, uses them to:
+    - Select keywords that match actual skills/tools used
+    - Add context that allows for more keyword incorporation
+    - Still preserves factual accuracy
+    """
+    if not client:
+        raise RuntimeError("ANTHROPIC_API_KEY missing")
+
+    has_facts = bool(stored_facts and any(stored_facts.get(c) for c in
+                     ["tools", "skills", "actions", "results", "situation", "timeline"]))
+
+    log.info(f"optimize_keywords_with_context - '{original_bullet[:50]}...' (has_facts: {has_facts})")
+    char_text = f"\nKeep under {char_limit} characters." if char_limit else ""
+
+    if has_facts:
+        facts_text = _format_facts(stored_facts)
+        source_section = f"""ORIGINAL BULLET:
+{original_bullet}
+
+VERIFIED FACTS (can use for keyword context):
+{facts_text}"""
+    else:
+        source_section = f"""ORIGINAL BULLET:
+{original_bullet}
+
+(No additional facts - only use information in the original bullet)"""
+
+    prompt = f"""You are optimizing a resume bullet for ATS keyword matching.
+
+{source_section}
+
+JOB DESCRIPTION:
+{job_description}
+
+YOUR TASK: Inject JD keywords while preserving factual accuracy.
+
+KEYWORD INJECTION STRATEGY:
+1. Identify JD keywords that match the candidate's actual experience
+2. Swap synonyms: Replace existing words with JD terminology
+3. Add context: If facts support it, add brief phrases using JD keywords
+4. Front-load: Put important keywords near the beginning
+
+CONSTRAINTS:
+- Every claim must be supported by original bullet OR verified facts
+- Do NOT add metrics, tools, or skills not in the source material
+- Keep the core meaning intact
+- If no facts provided, work only with original bullet content
+{char_text}
+Return ONLY the keyword-optimized bullet. No explanation."""
+
+    r = client.messages.create(
+        model=CHAT_MODEL,
+        max_tokens=512,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2
+    )
+
+    result = (r.content[0].text or "").strip().lstrip("-• ")
+    log.info(f"  Result: '{result[:60]}...'")
+    return result
+
+
+def optimize_keywords_hybrid(original_bullet: str, job_description: str,
+                              stored_facts: Dict = None, char_limit: Optional[int] = None) -> str:
+    """
+    Hybrid Keyword Optimization: Generate + Select best keyword version.
+
+    Multi-candidate approach for keywords:
+    1. Generate 3 versions with different keyword strategies
+    2. Score each for keyword alignment AND factual accuracy
+    3. Return the best one
+    """
+    if not client:
+        raise RuntimeError("ANTHROPIC_API_KEY missing")
+
+    log.info(f"optimize_keywords_hybrid - '{original_bullet[:50]}...'")
+    char_text = f"\nEach under {char_limit} chars." if char_limit else ""
+
+    # STAGE 1: Generate 3 keyword-optimized versions
+    gen_prompt = f"""Generate 3 versions of this bullet with different keyword optimization strategies.
+
+ORIGINAL BULLET:
+{original_bullet}
+
+JOB DESCRIPTION:
+{job_description}
+
+Create 3 versions:
+VERSION 1 (Conservative): Only swap exact synonyms from JD
+VERSION 2 (Moderate): Swap synonyms + add brief qualifying phrases with JD keywords
+VERSION 3 (Aggressive): Maximize keyword density while preserving core facts
+
+RULES FOR ALL VERSIONS:
+- Keep the original achievement/action intact
+- Do NOT add metrics, tools, or claims not in original
+- Do NOT change the meaning
+{char_text}
+
+VERSION 1: [bullet]
+VERSION 2: [bullet]
+VERSION 3: [bullet]"""
+
+    r1 = client.messages.create(
+        model=CHAT_MODEL,
+        max_tokens=1024,
+        messages=[{"role": "user", "content": gen_prompt}],
+        temperature=0.2
+    )
+    candidates = (r1.content[0].text or "").strip()
+    log.info(f"  Generated 3 keyword versions")
+
+    # STAGE 2: Select best version
+    select_prompt = f"""Select the BEST keyword-optimized version.
+
+ORIGINAL BULLET:
+{original_bullet}
+
+CANDIDATES:
+{candidates}
+
+EVALUATION CRITERIA (in order of importance):
+1. FACTUAL ACCURACY - Does it preserve the original meaning exactly?
+2. KEYWORD ALIGNMENT - How many relevant JD keywords are incorporated?
+3. NATURAL FLOW - Does it read naturally, not keyword-stuffed?
+
+Return ONLY the winning bullet text (no "VERSION X:")."""
+
+    r2 = client.messages.create(
+        model=CHAT_MODEL,
+        max_tokens=256,
+        messages=[{"role": "user", "content": select_prompt}],
+        temperature=0
+    )
+
+    selected = (r2.content[0].text or "").strip().lstrip("-• ")
+    for prefix in ["VERSION 1:", "VERSION 2:", "VERSION 3:", "Winner:", "Best:"]:
+        if selected.upper().startswith(prefix.upper()):
+            selected = selected[len(prefix):].strip()
+
+    log.info(f"  Selected: '{selected[:60]}...'")
+    return selected
 

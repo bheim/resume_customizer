@@ -775,6 +775,82 @@ async def generate_resume_with_facts(request: BulletGenerationRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/v2/apply/generate_keywords_only")
+async def generate_keywords_only(request: BulletGenerationRequest):
+    """
+    Generate keyword-optimized bullets WITHOUT using stored facts.
+    This is a faster, simpler optimization that focuses on ATS keyword alignment only.
+
+    Uses the 'light_touch' approach which:
+    - Swaps synonyms to match JD terminology
+    - Makes minimal adjustments while preserving factual accuracy
+    - Does NOT add new information, metrics, or claims
+
+    This endpoint is for users who want quick ATS optimization without the
+    full context-gathering flow.
+    """
+    log.info(f"/v2/apply/generate_keywords_only called for user {request.user_id} with {len(request.bullets)} bullets")
+
+    try:
+        from llm_utils import optimize_keywords_light_touch
+
+        # For each bullet, optimize keywords only (no facts needed)
+        enhanced_bullets = []
+
+        for idx, bullet_item in enumerate(request.bullets):
+            bullet_text = bullet_item.bullet_text
+
+            log.info(f"Optimizing bullet {idx} with keyword-only approach")
+
+            # Use light_touch keyword optimization (no facts, just terminology alignment)
+            enhanced_text = optimize_keywords_light_touch(
+                bullet_text,
+                request.job_description
+            )
+
+            # Add to results
+            enhanced_bullets.append({
+                "original": bullet_text,
+                "enhanced": enhanced_text,
+                "used_facts": False  # Always false for keyword-only mode
+            })
+
+        log.info(f"Generated {len(enhanced_bullets)} keyword-optimized bullets")
+
+        # Calculate comparative LLM scores for before/after evaluation
+        try:
+            from llm_utils import llm_comparative_score
+
+            log.info("Calculating comparative LLM scores for before/after evaluation")
+
+            # Extract bullet lists for comparative scoring
+            original_bullets = [b["original"] for b in enhanced_bullets]
+            enhanced_bullets_list = [b["enhanced"] for b in enhanced_bullets]
+
+            # Get comparative scores with dimension breakdowns
+            scores = llm_comparative_score(
+                original_bullets,
+                enhanced_bullets_list,
+                request.job_description
+            )
+
+            log.info(f"Comparative Score - Before: {scores['before_score']}, After: {scores['after_score']}, Improvement: {scores['improvement']:+.1f}")
+
+        except Exception as e:
+            log.warning(f"Failed to calculate comparative LLM scores: {e}")
+            scores = None
+
+        return {
+            "enhanced_bullets": enhanced_bullets,
+            "scores": scores,
+            "optimization_mode": "keywords_only"
+        }
+
+    except Exception as e:
+        log.exception(f"Error in keyword-only generation: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/download")
 async def download_resume(
     bullets: Optional[str] = Form(None),

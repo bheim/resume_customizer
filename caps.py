@@ -18,8 +18,8 @@ def enforce_char_cap_with_reprompt(cur: str, cap: int) -> str:
             "Return only the bullet text, no dash, no quotes.\n\n"
             f"Bullet:\n{text}"
         )
-        r = client.chat.completions.create(model=CHAT_MODEL, messages=[{"role":"user","content":prompt}], temperature=0)
-        nxt = (r.choices[0].message.content or "").replace("\n", " ").strip().lstrip("-• ").strip()
+        r = client.messages.create(model=CHAT_MODEL, messages=[{"role":"user","content":prompt}], temperature=0, max_tokens=1024)
+        nxt = (r.content[0].text or "").replace("\n", " ").strip().lstrip("-• ").strip()
         log.info(f"reprompt try={t+1} cap={cap} prev_len={len(text)} new_len={len(nxt)}")
         text = nxt
         if len(text) <= cap: break

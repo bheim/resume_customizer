@@ -664,20 +664,19 @@ async def generate_resume_with_facts(request: BulletGenerationRequest):
     """
     Generate optimized resume using stored facts for matched bullets.
     This is the second step in the job application flow.
+
+    Uses parallel processing to optimize multiple bullets concurrently for faster results.
     """
     log.info(f"/v2/apply/generate_with_facts called for user {request.user_id} with {len(request.bullets)} bullets")
 
     try:
+        import asyncio
         from db_utils_optimized import match_bullet_with_confidence_optimized
-        from llm_utils import embed, generate_bullet_metrics_and_tools, optimize_keywords_light_touch
+        from llm_utils import embed, generate_bullet_metrics_and_tools_async, optimize_keywords_light_touch_async
         from db_utils import get_bullet_facts
 
-        # For each bullet, try to find stored facts
-        enhanced_bullets = []
-        with_facts_count = 0
-        without_facts_count = 0
-
-        for idx, bullet_item in enumerate(request.bullets):
+        async def process_bullet(idx: int, bullet_item: BulletItem):
+            """Process a single bullet (called concurrently for all bullets)"""
             bullet_text = bullet_item.bullet_text
             used_facts = False
             enhanced_text = bullet_text  # Default to original
@@ -686,12 +685,11 @@ async def generate_resume_with_facts(request: BulletGenerationRequest):
             if not bullet_item.use_stored_facts:
                 # User chose not to use stored facts - use light keyword optimization
                 log.info(f"Bullet {idx} opted out of using stored facts, using light_touch keyword optimization")
-                enhanced_text = optimize_keywords_light_touch(
+                enhanced_text = await optimize_keywords_light_touch_async(
                     bullet_text,
                     request.job_description
                 )
                 used_facts = False
-                without_facts_count += 1
             else:
                 # Use provided bullet_id if available, otherwise match
                 bullet_id = bullet_item.bullet_id
@@ -714,31 +712,37 @@ async def generate_resume_with_facts(request: BulletGenerationRequest):
                 if facts:
                     # Generate with facts using metrics/tools approach
                     log.info(f"Generating bullet {idx} with stored facts (bullet_id: {bullet_id})")
-                    enhanced_text = generate_bullet_metrics_and_tools(
+                    enhanced_text = await generate_bullet_metrics_and_tools_async(
                         bullet_text,
                         request.job_description,
                         facts
                     )
                     used_facts = True
-                    with_facts_count += 1
                 else:
                     # Generate without facts - use light keyword optimization
                     log.info(f"Bullet {idx} has no stored facts, using light_touch keyword optimization")
-                    enhanced_text = optimize_keywords_light_touch(
+                    enhanced_text = await optimize_keywords_light_touch_async(
                         bullet_text,
                         request.job_description
                     )
                     used_facts = False
-                    without_facts_count += 1
 
-            # Add to results
-            enhanced_bullets.append({
+            return {
                 "original": bullet_text,
                 "enhanced": enhanced_text,
                 "used_facts": used_facts
-            })
+            }
 
-        log.info(f"Generated {with_facts_count} bullets with facts, {without_facts_count} without facts")
+        # Process all bullets in parallel using asyncio.gather()
+        log.info(f"Starting parallel processing of {len(request.bullets)} bullets...")
+        tasks = [process_bullet(idx, bullet_item) for idx, bullet_item in enumerate(request.bullets)]
+        enhanced_bullets = await asyncio.gather(*tasks)
+
+        # Count facts usage
+        with_facts_count = sum(1 for b in enhanced_bullets if b["used_facts"])
+        without_facts_count = len(enhanced_bullets) - with_facts_count
+
+        log.info(f"Parallel processing complete: {with_facts_count} bullets with facts, {without_facts_count} without facts")
 
         # Calculate comparative LLM scores for before/after evaluation
         try:
@@ -786,31 +790,29 @@ async def generate_keywords_only(request: BulletGenerationRequest):
 
     This endpoint is for users who want quick ATS optimization without the
     full context-gathering flow.
+
+    Uses parallel processing to optimize multiple bullets concurrently for faster results.
     """
     log.info(f"/v2/apply/generate_keywords_only called for user {request.user_id} with {len(request.bullets)} bullets")
 
     try:
-        from llm_utils import optimize_keywords_light_touch, deduplicate_repeated_words
+        import asyncio
+        from llm_utils import optimize_keywords_light_touch_async, deduplicate_repeated_words
 
-        # Step 1: Optimize each bullet individually for keywords
-        enhanced_bullets = []
-        original_bullets_list = []
+        # Step 1: Optimize all bullets in parallel for keywords
+        log.info(f"Starting parallel keyword optimization of {len(request.bullets)} bullets...")
+        original_bullets_list = [bullet_item.bullet_text for bullet_item in request.bullets]
 
-        for idx, bullet_item in enumerate(request.bullets):
-            bullet_text = bullet_item.bullet_text
-            original_bullets_list.append(bullet_text)
+        # Create tasks for parallel processing
+        tasks = [
+            optimize_keywords_light_touch_async(bullet_text, request.job_description)
+            for bullet_text in original_bullets_list
+        ]
 
-            log.info(f"Optimizing bullet {idx+1}/{len(request.bullets)} with keyword-only approach")
+        # Execute all optimizations in parallel
+        enhanced_bullets = await asyncio.gather(*tasks)
 
-            # Use light_touch keyword optimization (no facts, just terminology alignment)
-            enhanced_text = optimize_keywords_light_touch(
-                bullet_text,
-                request.job_description
-            )
-
-            enhanced_bullets.append(enhanced_text)
-
-        log.info(f"Generated {len(enhanced_bullets)} keyword-optimized bullets")
+        log.info(f"Parallel optimization complete: generated {len(enhanced_bullets)} keyword-optimized bullets")
 
         # Step 2: Deduplicate repeated words across all bullets
         log.info("Running deduplication pass to diversify vocabulary across bullets")

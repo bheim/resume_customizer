@@ -1,7 +1,7 @@
 import re, hashlib, json
 from json import loads
 from typing import List, Dict, Optional, Tuple
-from config import client, openai_client, CHAT_MODEL, EMBED_MODEL, USE_DISTILLED_JD, USE_LLM_TERMS, log
+from config import client, async_client, openai_client, CHAT_MODEL, EMBED_MODEL, USE_DISTILLED_JD, USE_LLM_TERMS, log
 from text_utils import top_terms
 
 _distill_cache: Dict[str, str] = {}
@@ -2232,6 +2232,212 @@ FORMAT: Use XYZ structure naturally (not formulaic):
 Return ONLY the enhanced bullet. No explanation."""
 
     response = client.messages.create(
+        model=CHAT_MODEL,
+        max_tokens=1024,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2
+    )
+
+    enhanced = (response.content[0].text or "").strip().lstrip("-• ")
+
+    log.info(f"  → Metrics/tools result: '{enhanced[:80]}...'")
+    return enhanced
+
+
+# =====================================================================
+# ASYNC VERSIONS FOR PARALLEL PROCESSING
+# =====================================================================
+
+async def optimize_keywords_light_touch_async(original_bullet: str, job_description: str,
+                                               stored_facts: Dict = None, char_limit: Optional[int] = None) -> str:
+    """
+    Async version of optimize_keywords_light_touch for parallel processing.
+
+    Light Touch: Small adjustments allowed, but with explicit guardrails.
+    Allows minor rephrasing beyond pure synonyms, but with a clear list of
+    what is and isn't allowed.
+    """
+    if not async_client:
+        raise RuntimeError("ANTHROPIC_API_KEY missing or async_client not initialized")
+
+    log.info(f"optimize_keywords_light_touch_async - '{original_bullet[:50]}...'")
+    char_text = f"Stay under {char_limit} characters." if char_limit else ""
+
+    prompt = f"""Make small adjustments to align this bullet with the job description keywords.
+
+ORIGINAL BULLET:
+{original_bullet}
+
+JOB DESCRIPTION:
+{job_description}
+
+ALLOWED (small adjustments):
+✓ Swap synonyms (e.g., "built" → "developed")
+✓ Reorder words slightly if meaning unchanged
+✓ Use JD phrasing for concepts already present (e.g., if bullet says "talked to users" and JD says "user research", can say "conducted user research" IF the bullet already describes research activities)
+
+FORBIDDEN (these invalidate the bullet):
+✗ Adding tools/technologies not mentioned (SQL, Python, Tableau, etc.)
+✗ Adding metrics or numbers not in original
+✗ Adding audiences not mentioned (stakeholders, leadership, clients)
+✗ Adding qualifiers that change scope (cross-functional, enterprise-wide, etc.)
+✗ Adding deliverables not mentioned (frameworks, models, recommendations)
+✗ Changing what was actually done
+
+GOAL: A hiring manager reading both versions should believe they describe the exact same work.
+
+{char_text}
+
+Return ONLY the adjusted bullet, nothing else."""
+
+    response = await async_client.messages.create(
+        model=CHAT_MODEL,
+        max_tokens=256,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0
+    )
+
+    result = (response.content[0].text or "").strip().lstrip("-• ")
+    log.info(f"  Result: '{result[:60]}...'")
+    return result
+
+
+async def generate_bullet_metrics_and_tools_async(original_bullet: str, job_description: str,
+                                                   stored_facts: Dict, char_limit: Optional[int] = None) -> str:
+    """
+    Async version of generate_bullet_metrics_and_tools for parallel processing.
+
+    Metrics & Tools Enhancement: ONLY add value when there's actual value to add.
+    This function checks for quantitative enhancements and routes to the appropriate strategy.
+    """
+    if not async_client:
+        raise RuntimeError("ANTHROPIC_API_KEY missing or async_client not initialized")
+
+    log.info(f"generate_bullet_metrics_and_tools_async - '{original_bullet[:50]}...'")
+
+    # Check if we have QUANTITATIVE enhancements to add
+    has_metrics = False
+    has_jd_tools = False
+    has_scope = False
+
+    if stored_facts:
+        # Check for metrics in results
+        results = stored_facts.get("results", [])
+        if results:
+            # Look for numbers, percentages, dollar amounts in results
+            import re
+            for result in results:
+                if re.search(r'\d+[%$KMB]|\d+\+|\d{1,3}(,\d{3})*', str(result)):
+                    has_metrics = True
+                    break
+
+        # Check for JD-relevant tools
+        tools = stored_facts.get("tools", [])
+        if tools:
+            # Only count as "has tools" if JD mentions them
+            for tool in tools:
+                if tool.lower() in job_description.lower():
+                    has_jd_tools = True
+                    break
+
+        # Check for scope information (team size, timeline, budget)
+        situation = stored_facts.get("situation", "")
+        timeline = stored_facts.get("timeline", "")
+        if situation or timeline:
+            # Look for team size, budget, duration indicators
+            import re
+            scope_indicators = r'\d+\s*(person|people|member|month|year|week|K|M|B|\$)'
+            if re.search(scope_indicators, situation + timeline, re.IGNORECASE):
+                has_scope = True
+
+    meaningful_enhancements = has_metrics or has_jd_tools or has_scope
+
+    log.info(f"  Enhancement check: metrics={has_metrics}, jd_tools={has_jd_tools}, scope={has_scope}")
+
+    # If no meaningful enhancements, fall back to light keyword optimization
+    if not meaningful_enhancements:
+        log.info(f"  → No quantitative enhancements available, using light_touch keyword optimization")
+        return await optimize_keywords_light_touch_async(original_bullet, job_description, stored_facts, char_limit)
+
+    # Build facts context showing ONLY the enhancement-worthy information
+    facts_text = ""
+
+    if stored_facts.get("situation"):
+        facts_text += f"Situation/Context: {stored_facts['situation']}\n"
+
+    if stored_facts.get("actions"):
+        actions = stored_facts["actions"]
+        if isinstance(actions, list) and actions:
+            facts_text += "Actions Taken:\n"
+            for item in actions:
+                facts_text += f"• {item}\n"
+
+    if stored_facts.get("results"):
+        results = stored_facts["results"]
+        if isinstance(results, list) and results:
+            facts_text += "Results/Achievements:\n"
+            for item in results:
+                facts_text += f"• {item}\n"
+
+    if stored_facts.get("skills"):
+        skills = stored_facts["skills"]
+        if isinstance(skills, list) and skills:
+            facts_text += f"Skills: {', '.join(skills)}\n"
+
+    if stored_facts.get("tools"):
+        tools = stored_facts["tools"]
+        if isinstance(tools, list) and tools:
+            facts_text += f"Tools/Technologies: {', '.join(tools)}\n"
+
+    if stored_facts.get("timeline"):
+        facts_text += f"Timeline: {stored_facts['timeline']}\n"
+
+    char_text = f"\nIMPORTANT: Keep the bullet under {char_limit} characters." if char_limit else ""
+
+    log.info(f"  → Has quantitative enhancements, using metrics/tools optimization")
+
+    prompt = f"""You are enhancing a resume bullet using VERIFIED FACTS. Be extremely conservative.
+
+TARGET JOB DESCRIPTION:
+{job_description}
+
+ORIGINAL BULLET:
+{original_bullet}
+
+VERIFIED FACTS (your ONLY source material):
+{facts_text}
+
+YOUR TASK: Enhance this bullet ONLY by adding:
+1. METRICS: Specific numbers, percentages, dollar amounts from the facts
+2. TOOLS: Technologies/tools that BOTH (a) appear in facts AND (b) are mentioned in JD
+3. SCOPE: Team size, timeline, or budget if it's in the facts
+
+STRICT RULES - VIOLATIONS ARE UNACCEPTABLE:
+✗ NO generic qualifiers: "strategic", "data-driven", "cross-functional", "evidence-based", "comprehensive"
+✗ NO vague intensifiers: "significantly", "substantially", "highly", "advanced", "robust"
+✗ NO buzzwords: "leveraging", "utilizing", "driving insights", "synergy", "best practices"
+✗ NO tools unless BOTH in facts AND in JD (if facts say "Excel" but JD wants "Python", don't add "Python")
+✗ NO assumptions (if facts say "used Python", don't say "advanced Python" or "Python scripting")
+✗ NO rephrasing for the sake of it - only add if there's quantitative value
+
+ACCEPTABLE ADDITIONS (examples):
+✓ "$500M portfolio" if that number is in facts
+✓ "20% improvement" if that metric is in facts
+✓ "Python and SQL" if BOTH are in facts AND JD mentions them
+✓ "6-person team" if team size is in facts
+✓ "3-month timeline" if duration is in facts
+
+PHILOSOPHY: A bullet with ONE real metric beats a bullet with three buzzwords.
+If you can't add meaningful metrics/tools/scope, make minimal changes.
+
+FORMAT: Use XYZ structure naturally (not formulaic):
+- What was accomplished + measurable result (if in facts) + how it was done
+- Examples: "Reduced costs 20% by automating...", "Led team of 8 to deliver...", "Analyzed $2.5B portfolio using SQL and Python..."
+
+{char_text}
+Return ONLY the enhanced bullet. No explanation."""
+
+    response = await async_client.messages.create(
         model=CHAT_MODEL,
         max_tokens=1024,
         messages=[{"role": "user", "content": prompt}],

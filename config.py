@@ -1,5 +1,5 @@
 import os, sys, logging
-from anthropic import Anthropic
+from anthropic import Anthropic, AsyncAnthropic
 from openai import OpenAI
 from supabase import create_client, Client
 
@@ -17,6 +17,7 @@ log.propagate = True
 # --- Anthropic (for chat completions) ---
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY")
 client = Anthropic(api_key=ANTHROPIC_KEY) if ANTHROPIC_KEY else None
+async_client = AsyncAnthropic(api_key=ANTHROPIC_KEY) if ANTHROPIC_KEY else None
 CHAT_MODEL = os.getenv("CHAT_MODEL", "claude-sonnet-4-5-20250929")
 
 # --- OpenAI (for embeddings only) ---

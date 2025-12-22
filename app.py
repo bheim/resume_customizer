@@ -1198,7 +1198,7 @@ async def upload(file: UploadFile = File(...), user_id: str = Form(...)):
     log.info(f"Extracted {len(bullets)} bullets for user {user_id}")
     # Log actual bullet content for debugging
     for i, bullet in enumerate(bullets[:3]):
-        log.info(f"Bullet {i+1} content: '{bullet[:150]}'")
+        log.info(f"Bullet {i+1} content: '{bullet[:150]}' (len={len(bullet)}, repr={repr(bullet[:50])})")
     if len(bullets) > 3:
         log.info(f"... and {len(bullets) - 3} more bullets")
 
@@ -1206,6 +1206,10 @@ async def upload(file: UploadFile = File(...), user_id: str = Form(...)):
     empty_count = sum(1 for b in bullets if not b or not b.strip())
     if empty_count > 0:
         log.warning(f"Found {empty_count} empty or whitespace-only bullets out of {len(bullets)}")
+        # Log what's actually in the paragraphs for the first few empty bullets
+        for i, (bullet, para) in enumerate(zip(bullets[:5], paras[:5])):
+            if not bullet or not bullet.strip():
+                log.warning(f"Empty bullet {i+1}: para.text={repr(para.text[:100])}, para.runs={len(para.runs)}")
 
     return JSONResponse({
         "bullets": bullets,

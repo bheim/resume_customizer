@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from config import log, health, supabase
 from docx_utils import load_docx, collect_word_numbered_bullets, set_paragraph_text_with_selective_links, enforce_single_page
+from pdf_utils import pdf_to_docx, is_pdf, is_docx
 from llm_utils import should_ask_more_questions
 from caps import tiered_char_cap, enforce_char_cap_with_reprompt
 from scoring import composite_score
@@ -424,6 +425,8 @@ async def upload_base_resume(
 ):
     """
     Upload and store a base resume for the user.
+    Supports both DOCX and PDF formats.
+    PDF files are automatically converted to DOCX for storage and processing.
     This resume can be reused across multiple job applications.
     """
     log.info(f"/v2/user/base_resume POST called for user {user_id}")
@@ -435,18 +438,34 @@ async def upload_base_resume(
         # Read file
         file_content = await file.read()
         file_name = file.filename or "base_resume.docx"
+        ct = file.content_type
 
-        # Validate it's a valid DOCX
+        log.info(f"Upload - File: {file_name}, Size: {len(file_content)} bytes, Type: {ct}")
+
+        # Convert PDF to DOCX if needed
+        if is_pdf(ct, file_content):
+            log.info("PDF detected, converting to DOCX for storage")
+            try:
+                file_content = pdf_to_docx(file_content)
+                # Update filename to reflect it's now a DOCX
+                if file_name.lower().endswith('.pdf'):
+                    file_name = file_name[:-4] + '.docx'
+                log.info(f"PDF conversion successful, new size: {len(file_content)} bytes")
+            except Exception as e:
+                log.exception("PDF conversion failed")
+                raise HTTPException(status_code=400, detail=f"Failed to convert PDF: {str(e)}")
+
+        # Validate it's a valid DOCX (either original or converted)
         try:
             doc = load_docx(file_content)
             bullets, _ = collect_word_numbered_bullets(doc)
             log.info(f"Validated DOCX with {len(bullets)} bullets")
         except Exception as e:
             log.exception("Invalid DOCX file")
-            raise HTTPException(status_code=400, detail=f"Invalid DOCX file: {str(e)}")
+            raise HTTPException(status_code=400, detail=f"Invalid document file: {str(e)}")
 
         # Hex-encode bytes for BYTEA column storage (consistent with Supabase return format)
-        log.info(f"Upload - File size: {len(file_content)} bytes")
+        log.info(f"Storing - File size: {len(file_content)} bytes")
         file_data_hex = '\\x' + file_content.hex()
 
         # Store in database (upsert)
@@ -582,6 +601,20 @@ async def match_bullets_for_job(
             log.info("Using uploaded resume file")
             content = await resume_file.read()
             resume_name = resume_file.filename or "resume.docx"
+            ct = resume_file.content_type
+
+            # Convert PDF to DOCX if needed
+            if is_pdf(ct, content):
+                log.info("PDF detected, converting to DOCX")
+                try:
+                    content = pdf_to_docx(content)
+                    # Update filename to reflect it's now a DOCX
+                    if resume_name.lower().endswith('.pdf'):
+                        resume_name = resume_name[:-4] + '.docx'
+                    log.info("PDF conversion successful")
+                except Exception as e:
+                    log.exception("PDF conversion failed")
+                    raise HTTPException(status_code=400, detail=f"Failed to convert PDF: {str(e)}")
 
             # Store uploaded resume in session table for later retrieval
             if not supabase:
@@ -1109,22 +1142,31 @@ async def download_resume(
 async def upload(file: UploadFile = File(...), user_id: str = Form(...)):
     """
     Upload resume and extract bullets.
-    Simple endpoint that returns just the bullets from the resume.
+    Supports both DOCX and PDF formats.
+    PDF files are automatically converted to DOCX for processing.
     """
     # Read and validate file
     raw = await file.read()
     size = len(raw)
     ct = file.content_type
-    log.info(f"/upload recv file='{file.filename}' size={size} user_id={user_id}")
+    log.info(f"/upload recv file='{file.filename}' size={size} content_type={ct} user_id={user_id}")
 
     if not raw or size < 512:
         return JSONResponse({"error": "empty_or_small_file"}, status_code=400)
 
-    if ct not in {"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                  "application/octet-stream", "application/msword"}:
-        return JSONResponse({"error": "bad_content_type", "got": ct}, status_code=415)
+    # Detect file type and convert if needed
+    if is_pdf(ct, raw):
+        log.info("PDF detected, converting to DOCX")
+        try:
+            raw = pdf_to_docx(raw)
+            log.info("PDF conversion successful")
+        except Exception as e:
+            log.exception("PDF conversion failed")
+            return JSONResponse({"error": "pdf_conversion_failed", "detail": str(e)}, status_code=400)
+    elif not is_docx(ct, raw):
+        return JSONResponse({"error": "bad_content_type", "got": ct, "detail": "Only DOCX and PDF files are supported"}, status_code=415)
 
-    # Parse DOCX
+    # Parse DOCX (either original or converted from PDF)
     try:
         doc = load_docx(raw)
     except Exception as e:

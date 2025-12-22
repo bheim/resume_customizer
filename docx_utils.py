@@ -183,6 +183,21 @@ def collect_word_numbered_bullets(doc: Document, use_heuristics: bool = False) -
     # Process tables
     for tbl in doc.tables:
         for row in tbl.rows:
+            # Check if this is a bullet row (first cell is just a bullet char)
+            if len(row.cells) >= 2:
+                first_cell_text = row.cells[0].text.strip()
+                # If first cell is ONLY a bullet character, get text from second cell
+                if first_cell_text in BULLET_CHARS:
+                    second_cell_text = row.cells[1].text.strip()
+                    if second_cell_text:
+                        # This is a table-based bullet point
+                        bullets.append(second_cell_text)
+                        # Use the paragraph from the second cell
+                        if row.cells[1].paragraphs:
+                            paras.append(row.cells[1].paragraphs[0])
+                        continue  # Skip normal cell processing for this row
+
+            # Normal cell processing (existing logic)
             for cell in row.cells:
                 for p in cell.paragraphs:
                     t = (p.text or "").strip()

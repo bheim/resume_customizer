@@ -105,7 +105,17 @@ def enforce_single_page(doc: Document):
     while len(_body_p())>1 and not doc.paragraphs[-1].text.strip():
         body.remove(doc.paragraphs[-1]._element)
 
-def collect_word_numbered_bullets(doc: Document) -> Tuple[List[str], List]:
+def collect_word_numbered_bullets(doc: Document, use_heuristics: bool = False) -> Tuple[List[str], List]:
+    """
+    Collect bullet points from a Word document.
+
+    Args:
+        doc: Word Document object
+        use_heuristics: If True, use lenient heuristics for PDF-converted docs
+
+    Returns:
+        Tuple of (bullet_texts, paragraph_objects)
+    """
     bullets, paras = [], []
     def _is_numbered(p):
         pPr = p._p.pPr
@@ -115,13 +125,62 @@ def collect_word_numbered_bullets(doc: Document) -> Tuple[List[str], List]:
             and (getattr(pPr.numPr, "numId", None) is not None)
             and (getattr(pPr.numPr.numId, "val", None) is not None)
         )
+
+    def _looks_like_bullet(text: str) -> bool:
+        """Heuristic check if text looks like a bullet point."""
+        if not text or len(text) < 10:  # Too short
+            return False
+
+        # Check if starts with bullet char
+        if text[0] in BULLET_CHARS:
+            return True
+
+        # Check if starts with common patterns (for PDF-converted docs)
+        # e.g., "• ", "- ", "o ", "▪ ", etc.
+        import re
+        bullet_patterns = [
+            r'^[•·\-–—◦●*○▪▫■□➢➣⚫⚪]\s',  # Bullet chars with space
+            r'^\d+[\.\)]\s',  # Numbers like "1. " or "1) "
+        ]
+        for pattern in bullet_patterns:
+            if re.match(pattern, text):
+                return True
+
+        return False
+
+    # Process paragraphs
     for p in doc.paragraphs:
         t = (p.text or "").strip()
         if not t: continue
+
         is_glyph = t and t[0] in BULLET_CHARS
-        if _is_numbered(p) or is_glyph:
+        is_numbered_list = _is_numbered(p)
+
+        # For PDF-converted docs, also check heuristics
+        if use_heuristics and not is_numbered_list and not is_glyph:
+            if _looks_like_bullet(t):
+                # Extract text after bullet char
+                import re
+                match = re.match(r'^[•·\-–—◦●*○▪▫■□➢➣⚫⚪]\s+(.+)$', t)
+                if match:
+                    t = match.group(1)
+                    bullets.append(t)
+                    paras.append(p)
+                    continue
+                match = re.match(r'^\d+[\.\)]\s+(.+)$', t)
+                if match:
+                    t = match.group(1)
+                    bullets.append(t)
+                    paras.append(p)
+                    continue
+
+        # Standard bullet detection
+        if is_numbered_list or is_glyph:
             if is_glyph: t = t[1:].lstrip()
-            bullets.append(t); paras.append(p)
+            bullets.append(t)
+            paras.append(p)
+
+    # Process tables
     for tbl in doc.tables:
         for row in tbl.rows:
             for cell in row.cells:

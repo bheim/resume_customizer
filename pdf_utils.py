@@ -7,7 +7,7 @@ from pdf2docx import Converter
 from config import log
 
 
-def pdf_to_docx(pdf_bytes: bytes) -> bytes:
+def pdf_to_docx(pdf_bytes: bytes, save_debug: bool = False) -> bytes:
     """
     Convert PDF bytes to DOCX bytes.
 

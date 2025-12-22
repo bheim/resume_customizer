@@ -597,6 +597,7 @@ async def match_bullets_for_job(
         session_id = str(uuid.uuid4())
 
         # Get resume content (either from upload or base resume)
+        was_pdf = False
         if resume_file:
             log.info("Using uploaded resume file")
             content = await resume_file.read()
@@ -608,6 +609,7 @@ async def match_bullets_for_job(
                 log.info("PDF detected, converting to DOCX")
                 try:
                     content = pdf_to_docx(content)
+                    was_pdf = True
                     # Update filename to reflect it's now a DOCX
                     if resume_name.lower().endswith('.pdf'):
                         resume_name = resume_name[:-4] + '.docx'
@@ -662,13 +664,19 @@ async def match_bullets_for_job(
             tmp_path = tmp.name
 
         doc = Document(tmp_path)
-        bullets, _ = collect_word_numbered_bullets(doc)
+        # Use heuristic bullet detection for PDF-converted docs
+        bullets, _ = collect_word_numbered_bullets(doc, use_heuristics=was_pdf)
         os.unlink(tmp_path)
 
         if not bullets:
             raise HTTPException(status_code=400, detail="No bullets found in resume")
 
         log.info(f"Extracted {len(bullets)} bullets from resume")
+        # Log first 3 bullets for debugging
+        for i, bullet in enumerate(bullets[:3]):
+            log.info(f"Bullet {i+1}: {bullet[:100] if bullet else '(empty)'}")
+        if len(bullets) > 3:
+            log.info(f"... and {len(bullets) - 3} more bullets")
 
         # Match each bullet
         matches = []
@@ -1155,10 +1163,12 @@ async def upload(file: UploadFile = File(...), user_id: str = Form(...)):
         return JSONResponse({"error": "empty_or_small_file"}, status_code=400)
 
     # Detect file type and convert if needed
+    was_pdf = False
     if is_pdf(ct, raw):
         log.info("PDF detected, converting to DOCX")
         try:
             raw = pdf_to_docx(raw)
+            was_pdf = True
             log.info("PDF conversion successful")
         except Exception as e:
             log.exception("PDF conversion failed")
@@ -1173,7 +1183,8 @@ async def upload(file: UploadFile = File(...), user_id: str = Form(...)):
         log.exception("bad_docx")
         return JSONResponse({"error": "bad_docx", "detail": str(e)}, status_code=400)
 
-    bullets, paras = collect_word_numbered_bullets(doc)
+    # Use heuristic bullet detection for PDF-converted docs
+    bullets, paras = collect_word_numbered_bullets(doc, use_heuristics=was_pdf)
 
     # Log all paragraphs for debugging
     log.info(f"Document has {len(doc.paragraphs)} paragraphs total")
@@ -1185,7 +1196,16 @@ async def upload(file: UploadFile = File(...), user_id: str = Form(...)):
         return JSONResponse({"error": "no_bullets_found", "detail": "Resume must use numbered lists or bullet points (•·-–—◦●*)"}, status_code=422)
 
     log.info(f"Extracted {len(bullets)} bullets for user {user_id}")
-    log.info(f"Sample bullets: {[b[:60] for b in bullets[:3]]}")
+    # Log actual bullet content for debugging
+    for i, bullet in enumerate(bullets[:3]):
+        log.info(f"Bullet {i+1} content: '{bullet[:150]}'")
+    if len(bullets) > 3:
+        log.info(f"... and {len(bullets) - 3} more bullets")
+
+    # Check if bullets are empty or just whitespace
+    empty_count = sum(1 for b in bullets if not b or not b.strip())
+    if empty_count > 0:
+        log.warning(f"Found {empty_count} empty or whitespace-only bullets out of {len(bullets)}")
 
     return JSONResponse({
         "bullets": bullets,

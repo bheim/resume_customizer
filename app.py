@@ -189,8 +189,9 @@ class BulletGenerationResponse(BaseModel):
 
 # Pydantic model for bullet editing
 class BulletEditRequest(BaseModel):
-    bullet_text: str
-    original_bullet_text: Optional[str] = None
+    user_id: str
+    original_bullet: str
+    edited_bullet: str
 
 
 class BulletEditResponse(BaseModel):
@@ -881,21 +882,17 @@ async def generate_keywords_only(request: BulletGenerationRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/v2/bullets/edit")
-async def edit_bullet_json(request: dict):
+@app.post("/v2/bullets/edit", response_model=BulletEditResponse)
+async def edit_bullet_json(request: BulletEditRequest):
     """
-    Validate and process an edited bullet (JSON version).
-
-    This endpoint allows users to edit optimized bullets and get real-time validation.
-    The backend checks character limits and can optionally use LLM to shorten
-    bullets that exceed the limit.
+    Validate and process an edited bullet.
 
     Request body:
-        - bullet_text: The edited bullet text
-        - original_bullet_text: The original bullet (used to determine character cap)
+        - user_id: User identifier
+        - original_bullet: The original bullet text (before optimization)
+        - edited_bullet: The user's edited text
 
     Returns:
-        BulletEditResponse with:
         - validated_text: The processed bullet text (may be shortened if too long)
         - char_count: Current character count
         - char_limit: Character limit based on original length
@@ -903,32 +900,15 @@ async def edit_bullet_json(request: dict):
         - was_shortened: Boolean indicating if LLM shortened the text
         - original_length: Length before validation
     """
-    log.info(f"/v2/bullets/edit called")
-    log.info(f"Raw request received: {request}")
+    log.info(f"/v2/bullets/edit called for user {request.user_id}")
 
     try:
-        # Extract fields from request
-        bullet_text = request.get("bullet_text") or request.get("bulletText")
-        original_bullet_text = request.get("original_bullet_text") or request.get("originalBulletText")
-
-        if not bullet_text:
-            log.error(f"Missing bullet_text in request. Keys received: {list(request.keys())}")
-            raise HTTPException(status_code=422, detail=f"Missing 'bullet_text' field. Received keys: {list(request.keys())}")
-
-        log.info(f"Extracted - bullet_text length: {len(bullet_text)}")
-        log.info(f"Extracted - original_bullet_text: {'provided' if original_bullet_text else 'not provided'}")
-
-        # Determine character cap
-        if original_bullet_text:
-            cap = tiered_char_cap(len(original_bullet_text))
-        else:
-            # Default to medium cap if no original provided
-            cap = tiered_char_cap(150)
-
+        # Determine character cap based on original bullet length
+        cap = tiered_char_cap(len(request.original_bullet))
         log.info(f"Character cap for this bullet: {cap}")
 
-        # Clean the input
-        cleaned_text = bullet_text.strip()
+        # Clean the edited text
+        cleaned_text = request.edited_bullet.strip()
         original_length = len(cleaned_text)
         exceeds_limit = original_length > cap
 
@@ -941,17 +921,15 @@ async def edit_bullet_json(request: dict):
             validated_text = cleaned_text
             was_shortened = False
 
-        return {
-            "validated_text": validated_text,
-            "char_count": len(validated_text),
-            "char_limit": cap,
-            "exceeds_limit": exceeds_limit,
-            "was_shortened": was_shortened,
-            "original_length": original_length
-        }
+        return BulletEditResponse(
+            validated_text=validated_text,
+            char_count=len(validated_text),
+            char_limit=cap,
+            exceeds_limit=exceeds_limit,
+            was_shortened=was_shortened,
+            original_length=original_length
+        )
 
-    except HTTPException:
-        raise
     except Exception as e:
         log.exception(f"Error validating bullet: {e}")
         raise HTTPException(status_code=500, detail=str(e))

@@ -187,6 +187,21 @@ class BulletGenerationResponse(BaseModel):
     enhanced_bullets: List[EnhancedBulletItem]
 
 
+# Pydantic model for bullet editing
+class BulletEditRequest(BaseModel):
+    bullet_text: str
+    original_bullet_text: Optional[str] = None
+
+
+class BulletEditResponse(BaseModel):
+    validated_text: str
+    char_count: int
+    char_limit: int
+    exceeds_limit: bool
+    was_shortened: bool
+    original_length: int
+
+
 # Pydantic models for base resume endpoints
 class BaseResumeUploadResponse(BaseModel):
     success: bool
@@ -863,6 +878,68 @@ async def generate_keywords_only(request: BulletGenerationRequest):
 
     except Exception as e:
         log.exception(f"Error in keyword-only generation: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/v2/bullets/edit", response_model=BulletEditResponse)
+async def edit_bullet_json(request: BulletEditRequest):
+    """
+    Validate and process an edited bullet (JSON version).
+
+    This endpoint allows users to edit optimized bullets and get real-time validation.
+    The backend checks character limits and can optionally use LLM to shorten
+    bullets that exceed the limit.
+
+    Request body:
+        - bullet_text: The edited bullet text
+        - original_bullet_text: The original bullet (used to determine character cap)
+
+    Returns:
+        BulletEditResponse with:
+        - validated_text: The processed bullet text (may be shortened if too long)
+        - char_count: Current character count
+        - char_limit: Character limit based on original length
+        - exceeds_limit: Boolean indicating if original edit exceeded limit
+        - was_shortened: Boolean indicating if LLM shortened the text
+        - original_length: Length before validation
+    """
+    log.info(f"/v2/bullets/edit called with bullet_text length={len(request.bullet_text)}")
+
+    try:
+        # Determine character cap
+        if request.original_bullet_text:
+            cap = tiered_char_cap(len(request.original_bullet_text))
+        else:
+            # Default to medium cap if no original provided
+            cap = tiered_char_cap(150)
+
+        log.info(f"Character cap for this bullet: {cap}")
+
+        # Clean the input
+        cleaned_text = request.bullet_text.strip()
+        original_length = len(cleaned_text)
+        exceeds_limit = original_length > cap
+
+        # Apply character cap if needed
+        if exceeds_limit:
+            log.info(f"Bullet exceeds limit ({original_length} > {cap}), applying enforcement")
+            validated_text = enforce_char_cap_with_reprompt(cleaned_text, cap)
+            was_shortened = True
+        else:
+            validated_text = cleaned_text
+            was_shortened = False
+
+        return BulletEditResponse(
+            validated_text=validated_text,
+            char_count=len(validated_text),
+            char_limit=cap,
+            exceeds_limit=exceeds_limit,
+            was_shortened=was_shortened,
+            original_length=original_length
+        )
+
+    except Exception as e:
+        log.exception(f"Error validating bullet: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

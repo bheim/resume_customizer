@@ -111,10 +111,10 @@ def is_docx(content_type: str, file_bytes: bytes) -> bool:
 
 def docx_to_pdf(docx_bytes: bytes) -> bytes:
     """
-    Convert DOCX bytes to PDF bytes.
+    Convert DOCX bytes to PDF bytes using pure Python (reportlab).
 
-    Uses LibreOffice headless mode for conversion on Mac/Linux.
-    Falls back to docx2pdf library on Windows.
+    This function parses the DOCX and generates a PDF directly without
+    requiring any system dependencies like LibreOffice.
 
     Args:
         docx_bytes: Raw bytes of DOCX file
@@ -123,113 +123,123 @@ def docx_to_pdf(docx_bytes: bytes) -> bytes:
         bytes: Raw bytes of converted PDF file
 
     Raises:
-        Exception: If conversion fails or LibreOffice is not installed
+        Exception: If conversion fails
     """
-    docx_temp = None
-    pdf_temp = None
-    temp_dir = None
+    from io import BytesIO
+    from docx import Document
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import inch
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+    from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
 
     try:
-        # Create temporary directory for conversion
-        temp_dir = tempfile.mkdtemp()
-
-        # Save DOCX to temp file
-        docx_temp = os.path.join(temp_dir, "input.docx")
-        with open(docx_temp, 'wb') as f:
-            f.write(docx_bytes)
-
         log.info(f"Converting DOCX to PDF (input size: {len(docx_bytes)} bytes)")
 
-        # Try LibreOffice first (works on Mac/Linux)
-        pdf_temp = os.path.join(temp_dir, "input.pdf")
+        # Load DOCX
+        doc = Document(BytesIO(docx_bytes))
 
-        # Try to find LibreOffice/soffice executable
-        soffice_paths = [
-            '/Applications/LibreOffice.app/Contents/MacOS/soffice',  # Mac
-            '/usr/bin/soffice',  # Linux
-            '/usr/bin/libreoffice',  # Linux alternative
-        ]
+        # Create PDF in memory
+        pdf_buffer = BytesIO()
+        pdf_doc = SimpleDocTemplate(
+            pdf_buffer,
+            pagesize=letter,
+            rightMargin=0.75*inch,
+            leftMargin=0.75*inch,
+            topMargin=0.75*inch,
+            bottomMargin=0.75*inch
+        )
 
-        soffice_cmd = None
+        # Build PDF content
+        styles = getSampleStyleSheet()
+        story = []
 
-        # Check explicit paths first
-        for path in soffice_paths:
-            if os.path.exists(path):
-                soffice_cmd = path
-                break
+        # Custom styles for different text types
+        normal_style = ParagraphStyle(
+            'CustomNormal',
+            parent=styles['Normal'],
+            fontSize=11,
+            leading=14,
+            spaceAfter=6
+        )
 
-        # If not found, check if it's in PATH
-        if not soffice_cmd:
-            import shutil
-            for cmd in ['soffice', 'libreoffice']:
-                if shutil.which(cmd):
-                    soffice_cmd = cmd
-                    break
+        bullet_style = ParagraphStyle(
+            'CustomBullet',
+            parent=styles['Normal'],
+            fontSize=11,
+            leading=14,
+            leftIndent=20,
+            spaceAfter=3,
+            bulletIndent=10
+        )
 
-        if soffice_cmd:
-            # Use LibreOffice headless conversion
-            cmd = [
-                soffice_cmd,
-                '--headless',
-                '--convert-to', 'pdf',
-                '--outdir', temp_dir,
-                docx_temp
-            ]
+        heading_style = ParagraphStyle(
+            'CustomHeading',
+            parent=styles['Heading1'],
+            fontSize=14,
+            leading=16,
+            spaceAfter=8,
+            spaceBefore=8,
+            bold=True
+        )
 
-            log.info(f"Using LibreOffice: {soffice_cmd}")
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
+        # Process each paragraph
+        for para in doc.paragraphs:
+            text = para.text.strip()
+            if not text:
+                story.append(Spacer(1, 0.1*inch))
+                continue
 
-            if result.returncode != 0:
-                log.error(f"LibreOffice conversion failed: {result.stderr}")
-                raise Exception(f"LibreOffice conversion failed: {result.stderr}")
+            # Determine if it's a heading (all caps or bold)
+            is_heading = text.isupper() and len(text) > 2
 
-            # Read the generated PDF
-            if not os.path.exists(pdf_temp):
-                raise Exception("PDF file was not created by LibreOffice")
+            # Determine if it's a bullet
+            is_bullet = text and text[0] in '•●◦-–—'
 
-            with open(pdf_temp, 'rb') as f:
-                pdf_bytes = f.read()
+            # Build formatted text
+            formatted_text = ""
+            for run in para.runs:
+                run_text = run.text
+                if not run_text:
+                    continue
 
-            log.info(f"DOCX to PDF conversion successful (output size: {len(pdf_bytes)} bytes)")
-            return pdf_bytes
+                # Apply formatting
+                if run.bold:
+                    run_text = f"<b>{run_text}</b>"
+                if run.italic:
+                    run_text = f"<i>{run_text}</i>"
+                if run.underline:
+                    run_text = f"<u>{run_text}</u>"
 
-        else:
-            # LibreOffice not found, try docx2pdf library as fallback
-            log.info("LibreOffice not found, trying docx2pdf library")
+                formatted_text += run_text
+
+            # Escape any remaining XML special chars
+            if not formatted_text:
+                formatted_text = text
+
+            # Add to story with appropriate style
             try:
-                from docx2pdf import convert
-
-                pdf_output = os.path.join(temp_dir, "output.pdf")
-                convert(docx_temp, pdf_output)
-
-                with open(pdf_output, 'rb') as f:
-                    pdf_bytes = f.read()
-
-                log.info(f"DOCX to PDF conversion via docx2pdf successful (output size: {len(pdf_bytes)} bytes)")
-                return pdf_bytes
-
+                if is_heading:
+                    story.append(Paragraph(formatted_text, heading_style))
+                elif is_bullet:
+                    # Remove bullet char and add proper bullet
+                    bullet_text = formatted_text.lstrip('•●◦-–— ')
+                    story.append(Paragraph(f"• {bullet_text}", bullet_style))
+                else:
+                    story.append(Paragraph(formatted_text, normal_style))
             except Exception as e:
-                log.exception(f"docx2pdf conversion failed: {e}")
-                raise Exception(
-                    "PDF conversion requires LibreOffice to be installed. "
-                    "Install it with: brew install libreoffice (Mac) or apt-get install libreoffice (Linux)"
-                )
+                # Fallback to plain text if formatting fails
+                log.warning(f"Formatting failed for paragraph, using plain text: {e}")
+                story.append(Paragraph(text, normal_style))
 
-    except subprocess.TimeoutExpired:
-        log.error("DOCX to PDF conversion timed out")
-        raise Exception("PDF conversion timed out after 30 seconds")
+        # Build PDF
+        pdf_doc.build(story)
+        pdf_bytes = pdf_buffer.getvalue()
+        pdf_buffer.close()
+
+        log.info(f"DOCX to PDF conversion successful (output size: {len(pdf_bytes)} bytes)")
+        return pdf_bytes
 
     except Exception as e:
         log.exception(f"DOCX to PDF conversion failed: {e}")
         raise Exception(f"Failed to convert DOCX to PDF: {str(e)}")
-
-    finally:
-        # Cleanup temp files
-        if temp_dir and os.path.exists(temp_dir):
-            import shutil
-            shutil.rmtree(temp_dir, ignore_errors=True)

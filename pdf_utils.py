@@ -111,10 +111,10 @@ def is_docx(content_type: str, file_bytes: bytes) -> bool:
 
 def docx_to_pdf(docx_bytes: bytes) -> bytes:
     """
-    Convert DOCX bytes to PDF bytes using pure Python (reportlab).
+    Convert DOCX bytes to PDF bytes preserving formatting.
 
-    This function parses the DOCX and generates a PDF directly without
-    requiring any system dependencies like LibreOffice.
+    Uses mammoth (DOCX→HTML) + weasyprint (HTML→PDF) to maintain
+    the original document formatting, layout, fonts, and styling.
 
     Args:
         docx_bytes: Raw bytes of DOCX file
@@ -126,116 +126,76 @@ def docx_to_pdf(docx_bytes: bytes) -> bytes:
         Exception: If conversion fails
     """
     from io import BytesIO
-    from docx import Document
-    from reportlab.lib.pagesizes import letter
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.units import inch
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-    from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
+    import mammoth
+    from weasyprint import HTML, CSS
 
     try:
         log.info(f"Converting DOCX to PDF (input size: {len(docx_bytes)} bytes)")
 
-        # Load DOCX
-        doc = Document(BytesIO(docx_bytes))
+        # Step 1: Convert DOCX to HTML using mammoth (preserves formatting)
+        result = mammoth.convert_to_html(BytesIO(docx_bytes))
+        html_content = result.value
 
-        # Create PDF in memory
-        pdf_buffer = BytesIO()
-        pdf_doc = SimpleDocTemplate(
-            pdf_buffer,
-            pagesize=letter,
-            rightMargin=0.75*inch,
-            leftMargin=0.75*inch,
-            topMargin=0.75*inch,
-            bottomMargin=0.75*inch
-        )
+        # Log any conversion messages/warnings
+        if result.messages:
+            for msg in result.messages:
+                log.debug(f"Mammoth: {msg}")
 
-        # Build PDF content
-        styles = getSampleStyleSheet()
-        story = []
+        # Step 2: Wrap HTML in a complete document with CSS for better rendering
+        full_html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <style>
+                @page {{
+                    size: letter;
+                    margin: 0.75in;
+                }}
+                body {{
+                    font-family: Arial, Helvetica, sans-serif;
+                    font-size: 11pt;
+                    line-height: 1.4;
+                    color: #000000;
+                }}
+                p {{
+                    margin: 0 0 0.5em 0;
+                }}
+                ul, ol {{
+                    margin: 0.5em 0;
+                    padding-left: 1.5em;
+                }}
+                li {{
+                    margin-bottom: 0.3em;
+                }}
+                strong {{
+                    font-weight: bold;
+                }}
+                em {{
+                    font-style: italic;
+                }}
+                h1, h2, h3, h4, h5, h6 {{
+                    font-weight: bold;
+                    margin: 0.5em 0 0.3em 0;
+                }}
+                h1 {{ font-size: 16pt; }}
+                h2 {{ font-size: 14pt; }}
+                h3 {{ font-size: 12pt; }}
+                a {{
+                    color: #0066cc;
+                    text-decoration: underline;
+                }}
+            </style>
+        </head>
+        <body>
+            {html_content}
+        </body>
+        </html>
+        """
 
-        # Custom styles for different text types
-        normal_style = ParagraphStyle(
-            'CustomNormal',
-            parent=styles['Normal'],
-            fontSize=11,
-            leading=14,
-            spaceAfter=6
-        )
-
-        bullet_style = ParagraphStyle(
-            'CustomBullet',
-            parent=styles['Normal'],
-            fontSize=11,
-            leading=14,
-            leftIndent=20,
-            spaceAfter=3,
-            bulletIndent=10
-        )
-
-        heading_style = ParagraphStyle(
-            'CustomHeading',
-            parent=styles['Heading1'],
-            fontSize=14,
-            leading=16,
-            spaceAfter=8,
-            spaceBefore=8,
-            bold=True
-        )
-
-        # Process each paragraph
-        for para in doc.paragraphs:
-            text = para.text.strip()
-            if not text:
-                story.append(Spacer(1, 0.1*inch))
-                continue
-
-            # Determine if it's a heading (all caps or bold)
-            is_heading = text.isupper() and len(text) > 2
-
-            # Determine if it's a bullet
-            is_bullet = text and text[0] in '•●◦-–—'
-
-            # Build formatted text
-            formatted_text = ""
-            for run in para.runs:
-                run_text = run.text
-                if not run_text:
-                    continue
-
-                # Apply formatting
-                if run.bold:
-                    run_text = f"<b>{run_text}</b>"
-                if run.italic:
-                    run_text = f"<i>{run_text}</i>"
-                if run.underline:
-                    run_text = f"<u>{run_text}</u>"
-
-                formatted_text += run_text
-
-            # Escape any remaining XML special chars
-            if not formatted_text:
-                formatted_text = text
-
-            # Add to story with appropriate style
-            try:
-                if is_heading:
-                    story.append(Paragraph(formatted_text, heading_style))
-                elif is_bullet:
-                    # Remove bullet char and add proper bullet
-                    bullet_text = formatted_text.lstrip('•●◦-–— ')
-                    story.append(Paragraph(f"• {bullet_text}", bullet_style))
-                else:
-                    story.append(Paragraph(formatted_text, normal_style))
-            except Exception as e:
-                # Fallback to plain text if formatting fails
-                log.warning(f"Formatting failed for paragraph, using plain text: {e}")
-                story.append(Paragraph(text, normal_style))
-
-        # Build PDF
-        pdf_doc.build(story)
-        pdf_bytes = pdf_buffer.getvalue()
-        pdf_buffer.close()
+        # Step 3: Convert HTML to PDF using weasyprint
+        html = HTML(string=full_html)
+        pdf_bytes = html.write_pdf()
 
         log.info(f"DOCX to PDF conversion successful (output size: {len(pdf_bytes)} bytes)")
         return pdf_bytes

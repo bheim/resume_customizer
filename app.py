@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from config import log, health, supabase
 from docx_utils import load_docx, collect_word_numbered_bullets, set_paragraph_text_with_selective_links, enforce_single_page
-from pdf_utils import pdf_to_docx, is_pdf, is_docx
+from pdf_utils import pdf_to_docx, docx_to_pdf, is_pdf, is_docx
 from llm_utils import should_ask_more_questions
 from caps import tiered_char_cap, enforce_char_cap_with_reprompt
 from scoring import composite_score
@@ -981,10 +981,14 @@ async def download_resume(
     bullets: Optional[str] = Form(None),
     user_id: Optional[str] = Form(None),
     session_id: Optional[str] = Form(None),
-    file: Optional[UploadFile] = File(None)
+    file: Optional[UploadFile] = File(None),
+    format: Optional[str] = Form("docx")
 ):
     """
-    Generate final resume DOCX with enhanced bullets.
+    Generate final resume in DOCX or PDF format with enhanced bullets.
+
+    Args:
+        format: Output format - "docx" (default) or "pdf"
 
     Priority order for resume source:
     1. Uploaded file (if provided)
@@ -1126,18 +1130,41 @@ async def download_resume(
         from io import BytesIO
         buf = BytesIO()
         doc.save(buf)
-        data = buf.getvalue()
+        docx_data = buf.getvalue()
 
         log.info(f"Generated DOCX file with {len(enhanced_texts)} enhanced bullets")
 
-        # Return the file as a download
-        return Response(
-            content=data,
-            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            headers={
-                "Content-Disposition": 'attachment; filename="resume_optimized.docx"'
-            }
-        )
+        # Convert to PDF if requested
+        output_format = (format or "docx").lower()
+
+        if output_format == "pdf":
+            log.info("Converting DOCX to PDF for download")
+            try:
+                pdf_data = docx_to_pdf(docx_data)
+                log.info(f"PDF conversion successful, size: {len(pdf_data)} bytes")
+
+                return Response(
+                    content=pdf_data,
+                    media_type="application/pdf",
+                    headers={
+                        "Content-Disposition": 'attachment; filename="resume_optimized.pdf"'
+                    }
+                )
+            except Exception as e:
+                log.exception(f"PDF conversion failed: {e}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"PDF conversion failed: {str(e)}. Please download as DOCX instead."
+                )
+        else:
+            # Return DOCX (default)
+            return Response(
+                content=docx_data,
+                media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                headers={
+                    "Content-Disposition": 'attachment; filename="resume_optimized.docx"'
+                }
+            )
 
     except HTTPException:
         raise

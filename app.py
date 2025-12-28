@@ -628,6 +628,20 @@ async def match_bullets_for_job(
             log.info(f"Retrieval - Data type: {type(content)}")
             log.info(f"Loaded base resume from database ({len(content)} bytes)")
 
+            # Store session even when using base resume (so preview/download can find it)
+            try:
+                resume_name = "base_resume.docx"
+                supabase.table("job_application_sessions").insert({
+                    "user_id": user_id,
+                    "session_id": session_id,
+                    "resume_data": content_hex,
+                    "resume_name": resume_name
+                }).execute()
+                log.info(f"Stored session for base resume with session_id {session_id}")
+            except Exception as e:
+                log.warning(f"Failed to store base resume session: {e}")
+                # Continue anyway - not critical
+
         # Extract bullets from resume
         with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp:
             tmp.write(content)

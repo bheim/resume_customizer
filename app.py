@@ -1090,7 +1090,7 @@ async def preview_resume(
 
         log.info(f"Generated preview DOCX with {len(enhanced_texts)} enhanced bullets, size: {len(docx_data)} bytes")
 
-        # Return DOCX WITHOUT download header (for in-browser rendering)
+        # Return DOCX bytes for client-side rendering
         return Response(
             content=docx_data,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document"

@@ -968,6 +968,16 @@ async def preview_resume(
     log.info(f"/v2/preview called")
     log.info(f"Received parameters: bullets={'present' if bullets else 'missing'}, user_id={user_id}, session_id={session_id}, file={'present' if file else 'missing'}")
 
+    # DETAILED LOGGING FOR DEBUGGING LOVABLE
+    log.info(f"EXACT VALUES RECEIVED:")
+    log.info(f"  user_id = {repr(user_id)} (type: {type(user_id).__name__})")
+    log.info(f"  session_id = {repr(session_id)} (type: {type(session_id).__name__})")
+    if bullets:
+        log.info(f"  bullets length = {len(bullets)} chars")
+        log.info(f"  bullets preview = {bullets[:200]}...")
+    else:
+        log.info(f"  bullets = None")
+
     # This is identical logic to /download - we generate the exact same DOCX
     # The only difference is the response headers (no Content-Disposition attachment)
 
@@ -1007,24 +1017,43 @@ async def preview_resume(
 
         # Get resume content (same priority as /download)
         if file:
+            log.info("Using uploaded file for preview")
             raw = await file.read()
             file_name = file.filename or "resume.docx"
         elif session_id:
+            log.info(f"Looking up session in database: session_id={session_id}")
             if not supabase:
                 raise HTTPException(status_code=503, detail="Supabase not configured")
             result = supabase.table("job_application_sessions").select(
                 "resume_data, resume_name"
             ).eq("session_id", session_id).execute()
+
+            log.info(f"Supabase query result: data={result.data}, count={len(result.data) if result.data else 0}")
+
             if not result.data or len(result.data) == 0:
-                raise HTTPException(status_code=404, detail="Session not found")
+                # Log helpful debug info
+                log.error(f"Session NOT FOUND in database: {session_id}")
+                log.error(f"This session_id was sent by frontend but doesn't exist in job_application_sessions table")
+                log.error(f"Possible causes: 1) Wrong session_id sent, 2) Session not created during apply flow, 3) Session expired/deleted")
+                raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
+
+            log.info(f"Session found! resume_name={result.data[0].get('resume_name')}")
             raw = decode_base64(result.data[0]["resume_data"])
             file_name = result.data[0].get("resume_name", "resume.docx")
         else:
+            log.info(f"No file or session_id provided, falling back to base resume for user_id={user_id}")
             if not supabase:
                 raise HTTPException(status_code=503, detail="Supabase not configured")
             result = supabase.table("user_base_resumes").select("file_data").eq("user_id", user_id).execute()
+
+            log.info(f"Base resume query result: count={len(result.data) if result.data else 0}")
+
             if not result.data or len(result.data) == 0:
-                raise HTTPException(status_code=400, detail="No resume found")
+                log.error(f"No base resume found for user_id={user_id}")
+                log.error(f"User needs to upload a base resume via /v2/user/base_resume first")
+                raise HTTPException(status_code=400, detail=f"No resume found for user: {user_id}")
+
+            log.info(f"Base resume found for user_id={user_id}")
             raw = decode_base64(result.data[0]["file_data"])
             file_name = "resume.docx"
 

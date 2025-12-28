@@ -945,6 +945,123 @@ async def edit_bullet_json(request: BulletEditRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/v2/preview")
+async def preview_resume(
+    bullets: Optional[str] = Form(None),
+    user_id: Optional[str] = Form(None),
+    session_id: Optional[str] = Form(None),
+    file: Optional[UploadFile] = File(None)
+):
+    """
+    Generate DOCX preview with current bullets for client-side rendering.
+
+    Same logic as /download but returns raw DOCX bytes (no download header)
+    for in-browser preview using docx-preview library.
+
+    Priority order for resume source:
+    1. Uploaded file (if provided)
+    2. Session resume (if session_id provided)
+    3. Base resume (if exists)
+
+    Returns DOCX bytes for browser rendering.
+    """
+    log.info(f"/v2/preview called")
+    log.info(f"Received parameters: bullets={'present' if bullets else 'missing'}, user_id={user_id}, session_id={session_id}, file={'present' if file else 'missing'}")
+
+    # This is identical logic to /download - we generate the exact same DOCX
+    # The only difference is the response headers (no Content-Disposition attachment)
+
+    # For now, reuse /download logic - will refactor if needed
+    # Call internal helper or duplicate logic here
+    # Since /download is the next function, we can extract common logic to a helper
+
+    # For simplicity, I'll duplicate the logic here
+    # (In production, you'd extract this to a shared helper function)
+
+    # Validate required parameters
+    if not bullets:
+        raise HTTPException(status_code=400, detail="Missing required parameter: bullets")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Missing required parameter: user_id")
+
+    try:
+        import json
+        from io import BytesIO
+        from docx import Document
+
+        # Parse bullets
+        try:
+            enhanced_bullets = json.loads(bullets)
+            if not isinstance(enhanced_bullets, list):
+                raise HTTPException(status_code=400, detail="bullets must be a JSON array")
+        except json.JSONDecodeError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid JSON in bullets: {str(e)}")
+
+        # Extract enhanced text
+        enhanced_texts = []
+        for bullet in enhanced_bullets:
+            if isinstance(bullet, dict):
+                enhanced_texts.append(bullet.get("enhanced", bullet.get("original", "")))
+            else:
+                enhanced_texts.append(str(bullet))
+
+        # Get resume content (same priority as /download)
+        if file:
+            raw = await file.read()
+            file_name = file.filename or "resume.docx"
+        elif session_id:
+            if not supabase:
+                raise HTTPException(status_code=503, detail="Supabase not configured")
+            result = supabase.table("job_application_sessions").select(
+                "resume_data, resume_name"
+            ).eq("session_id", session_id).execute()
+            if not result.data or len(result.data) == 0:
+                raise HTTPException(status_code=404, detail="Session not found")
+            raw = decode_base64(result.data[0]["resume_data"])
+            file_name = result.data[0].get("resume_name", "resume.docx")
+        else:
+            if not supabase:
+                raise HTTPException(status_code=503, detail="Supabase not configured")
+            result = supabase.table("user_base_resumes").select("file_data").eq("user_id", user_id).execute()
+            if not result.data or len(result.data) == 0:
+                raise HTTPException(status_code=400, detail="No resume found")
+            raw = decode_base64(result.data[0]["file_data"])
+            file_name = "resume.docx"
+
+        # Load DOCX and replace bullets
+        doc = Document(BytesIO(raw))
+        bullets_in_doc, paras = collect_word_numbered_bullets(doc)
+
+        if len(enhanced_texts) != len(paras):
+            log.warning(f"Mismatch: {len(enhanced_texts)} enhanced bullets vs {len(paras)} original bullets")
+
+        for i, (enhanced_text, para) in enumerate(zip(enhanced_texts, paras)):
+            if i < len(enhanced_texts):
+                set_paragraph_text_with_selective_links(para, enhanced_text)
+
+        # Enforce single page
+        enforce_single_page(doc)
+
+        # Generate DOCX bytes
+        buf = BytesIO()
+        doc.save(buf)
+        docx_data = buf.getvalue()
+
+        log.info(f"Generated preview DOCX with {len(enhanced_texts)} enhanced bullets, size: {len(docx_data)} bytes")
+
+        # Return DOCX WITHOUT download header (for in-browser rendering)
+        return Response(
+            content=docx_data,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception(f"Error in /v2/preview: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/download")
 async def download_resume(
     bullets: Optional[str] = Form(None),

@@ -628,20 +628,6 @@ async def match_bullets_for_job(
             log.info(f"Retrieval - Data type: {type(content)}")
             log.info(f"Loaded base resume from database ({len(content)} bytes)")
 
-            # Store session even when using base resume (so preview/download can find it)
-            try:
-                resume_name = "base_resume.docx"
-                supabase.table("job_application_sessions").insert({
-                    "user_id": user_id,
-                    "session_id": session_id,
-                    "resume_data": content_hex,
-                    "resume_name": resume_name
-                }).execute()
-                log.info(f"Stored session for base resume with session_id {session_id}")
-            except Exception as e:
-                log.warning(f"Failed to store base resume session: {e}")
-                # Continue anyway - not critical
-
         # Extract bullets from resume
         with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp:
             tmp.write(content)
@@ -1044,16 +1030,28 @@ async def preview_resume(
 
             log.info(f"Supabase query result: data={result.data}, count={len(result.data) if result.data else 0}")
 
-            if not result.data or len(result.data) == 0:
-                # Log helpful debug info
-                log.error(f"Session NOT FOUND in database: {session_id}")
-                log.error(f"This session_id was sent by frontend but doesn't exist in job_application_sessions table")
-                log.error(f"Possible causes: 1) Wrong session_id sent, 2) Session not created during apply flow, 3) Session expired/deleted")
-                raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
+            if result.data and len(result.data) > 0:
+                # Session found - use it
+                log.info(f"Session found! resume_name={result.data[0].get('resume_name')}")
+                raw = decode_base64(result.data[0]["resume_data"])
+                file_name = result.data[0].get("resume_name", "resume.docx")
+            else:
+                # Session not found - fall back to base resume (same as /download)
+                log.warning(f"Session {session_id} not found, falling back to base resume")
+                result = supabase.table("user_base_resumes").select(
+                    "file_data, file_name"
+                ).eq("user_id", user_id).execute()
 
-            log.info(f"Session found! resume_name={result.data[0].get('resume_name')}")
-            raw = decode_base64(result.data[0]["resume_data"])
-            file_name = result.data[0].get("resume_name", "resume.docx")
+                if not result.data or len(result.data) == 0:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Session resume not found and no base resume exists. Please upload a resume."
+                    )
+
+                # Use base resume
+                raw = decode_base64(result.data[0]["file_data"])
+                file_name = result.data[0].get("file_name", "resume.docx")
+                log.info(f"Loaded base resume: {file_name}")
         else:
             log.info(f"No file or session_id provided, falling back to base resume for user_id={user_id}")
             if not supabase:

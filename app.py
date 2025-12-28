@@ -6,7 +6,6 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from config import log, health, supabase
 from docx_utils import load_docx, collect_word_numbered_bullets, set_paragraph_text_with_selective_links, enforce_single_page
-from pdf_utils import pdf_to_docx, docx_to_pdf, is_pdf, is_docx
 from llm_utils import should_ask_more_questions
 from caps import tiered_char_cap, enforce_char_cap_with_reprompt
 from scoring import composite_score
@@ -425,8 +424,7 @@ async def upload_base_resume(
 ):
     """
     Upload and store a base resume for the user.
-    Supports both DOCX and PDF formats.
-    PDF files are automatically converted to DOCX for storage and processing.
+    Supports DOCX format only.
     This resume can be reused across multiple job applications.
     """
     log.info(f"/v2/user/base_resume POST called for user {user_id}")
@@ -442,20 +440,7 @@ async def upload_base_resume(
 
         log.info(f"Upload - File: {file_name}, Size: {len(file_content)} bytes, Type: {ct}")
 
-        # Convert PDF to DOCX if needed
-        if is_pdf(ct, file_content):
-            log.info("PDF detected, converting to DOCX for storage")
-            try:
-                file_content = pdf_to_docx(file_content)
-                # Update filename to reflect it's now a DOCX
-                if file_name.lower().endswith('.pdf'):
-                    file_name = file_name[:-4] + '.docx'
-                log.info(f"PDF conversion successful, new size: {len(file_content)} bytes")
-            except Exception as e:
-                log.exception("PDF conversion failed")
-                raise HTTPException(status_code=400, detail=f"Failed to convert PDF: {str(e)}")
-
-        # Validate it's a valid DOCX (either original or converted)
+        # Validate it's a valid DOCX
         try:
             doc = load_docx(file_content)
             bullets, _ = collect_word_numbered_bullets(doc)
@@ -597,26 +582,11 @@ async def match_bullets_for_job(
         session_id = str(uuid.uuid4())
 
         # Get resume content (either from upload or base resume)
-        was_pdf = False
         if resume_file:
             log.info("Using uploaded resume file")
             content = await resume_file.read()
             resume_name = resume_file.filename or "resume.docx"
             ct = resume_file.content_type
-
-            # Convert PDF to DOCX if needed
-            if is_pdf(ct, content):
-                log.info("PDF detected, converting to DOCX")
-                try:
-                    content = pdf_to_docx(content)
-                    was_pdf = True
-                    # Update filename to reflect it's now a DOCX
-                    if resume_name.lower().endswith('.pdf'):
-                        resume_name = resume_name[:-4] + '.docx'
-                    log.info("PDF conversion successful")
-                except Exception as e:
-                    log.exception("PDF conversion failed")
-                    raise HTTPException(status_code=400, detail=f"Failed to convert PDF: {str(e)}")
 
             # Store uploaded resume in session table for later retrieval
             if not supabase:
@@ -664,8 +634,7 @@ async def match_bullets_for_job(
             tmp_path = tmp.name
 
         doc = Document(tmp_path)
-        # Use heuristic bullet detection for PDF-converted docs
-        bullets, _ = collect_word_numbered_bullets(doc, use_heuristics=was_pdf)
+        bullets, _ = collect_word_numbered_bullets(doc)
         os.unlink(tmp_path)
 
         if not bullets:
@@ -981,14 +950,10 @@ async def download_resume(
     bullets: Optional[str] = Form(None),
     user_id: Optional[str] = Form(None),
     session_id: Optional[str] = Form(None),
-    file: Optional[UploadFile] = File(None),
-    format: Optional[str] = Form("docx")
+    file: Optional[UploadFile] = File(None)
 ):
     """
-    Generate final resume in DOCX or PDF format with enhanced bullets.
-
-    Args:
-        format: Output format - "docx" (default) or "pdf"
+    Generate final resume in DOCX format with enhanced bullets.
 
     Priority order for resume source:
     1. Uploaded file (if provided)
@@ -1134,37 +1099,14 @@ async def download_resume(
 
         log.info(f"Generated DOCX file with {len(enhanced_texts)} enhanced bullets")
 
-        # Convert to PDF if requested
-        output_format = (format or "docx").lower()
-
-        if output_format == "pdf":
-            log.info("Converting DOCX to PDF for download")
-            try:
-                pdf_data = docx_to_pdf(docx_data)
-                log.info(f"PDF conversion successful, size: {len(pdf_data)} bytes")
-
-                return Response(
-                    content=pdf_data,
-                    media_type="application/pdf",
-                    headers={
-                        "Content-Disposition": 'attachment; filename="resume_optimized.pdf"'
-                    }
-                )
-            except Exception as e:
-                log.exception(f"PDF conversion failed: {e}")
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"PDF conversion failed: {str(e)}. Please download as DOCX instead."
-                )
-        else:
-            # Return DOCX (default)
-            return Response(
-                content=docx_data,
-                media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                headers={
-                    "Content-Disposition": 'attachment; filename="resume_optimized.docx"'
-                }
-            )
+        # Return DOCX
+        return Response(
+            content=docx_data,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={
+                "Content-Disposition": 'attachment; filename="resume_optimized.docx"'
+            }
+        )
 
     except HTTPException:
         raise
@@ -1177,8 +1119,7 @@ async def download_resume(
 async def upload(file: UploadFile = File(...), user_id: str = Form(...)):
     """
     Upload resume and extract bullets.
-    Supports both DOCX and PDF formats.
-    PDF files are automatically converted to DOCX for processing.
+    Supports DOCX format only.
     """
     # Read and validate file
     raw = await file.read()
@@ -1189,29 +1130,15 @@ async def upload(file: UploadFile = File(...), user_id: str = Form(...)):
     if not raw or size < 512:
         return JSONResponse({"error": "empty_or_small_file"}, status_code=400)
 
-    # Detect file type and convert if needed
-    was_pdf = False
-    if is_pdf(ct, raw):
-        log.info("PDF detected, converting to DOCX")
-        try:
-            raw = pdf_to_docx(raw)
-            was_pdf = True
-            log.info("PDF conversion successful")
-        except Exception as e:
-            log.exception("PDF conversion failed")
-            return JSONResponse({"error": "pdf_conversion_failed", "detail": str(e)}, status_code=400)
-    elif not is_docx(ct, raw):
-        return JSONResponse({"error": "bad_content_type", "got": ct, "detail": "Only DOCX and PDF files are supported"}, status_code=415)
-
-    # Parse DOCX (either original or converted from PDF)
+    # Parse DOCX
     try:
         doc = load_docx(raw)
     except Exception as e:
         log.exception("bad_docx")
         return JSONResponse({"error": "bad_docx", "detail": str(e)}, status_code=400)
 
-    # Use heuristic bullet detection for PDF-converted docs
-    bullets, paras = collect_word_numbered_bullets(doc, use_heuristics=was_pdf)
+    # Extract bullets
+    bullets, paras = collect_word_numbered_bullets(doc)
 
     # Log all paragraphs for debugging
     log.info(f"Document has {len(doc.paragraphs)} paragraphs total")
